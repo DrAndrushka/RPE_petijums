@@ -1,3 +1,15 @@
+"""
+Inferential screening module for predictor-vs-target association testing.
+
+This version supports one or many binary targets and returns a long-format
+table with one row per (target, predictor) pair.
+
+TODO:
+- Add optional mixed-effects models for clustered cohorts.
+- Add target-specific min_non_missing thresholds.
+- Add optional bootstrap parallelization for large runs.
+"""
+
 #============ imports ============
 from __future__ import annotations
 
@@ -24,10 +36,12 @@ GREEN = "\033[38;5;28m"
 YELLOW = "\033[38;5;214m"
 ORANGE = "\033[38;5;202m"
 RED = "\033[38;5;196m"
+GRAY = "\033[38;5;245m"
 RESET = "\033[0m"
 
 
 INFERENTIAL_COLS = [
+    "target",
     "predictor",
     "test_name",
     "test_stat",
@@ -37,16 +51,12 @@ INFERENTIAL_COLS = [
     "ci_high",
     "p_value",
     "p_value_fdr",
-    "expected_cell_min",
-    "expected_cell_lt5_pct",
-    "expected_cell_warning",
     "n",
     "missing_pct",
     "status",
     "skipped_reason",
     "fdr_significant",
-    "clinically_relevant",
-]
+    "clinically_relevant",]
 
 _EFFECT_SIZE_THRESHOLDS = {
     "point_biserial_r": {"small": 0.10, "moderate": 0.30, "large": 0.50},
@@ -94,26 +104,31 @@ class YlivertainenInferential:
         feature_decisions_df: pd.DataFrame,
         metadata: dict | None = None,
         target_col: str | None = None,
+        target_cols: Sequence[str] | None = None,
         default_positive_class=None,
         effect_size_thresholds: dict[str, dict[str, float]] | None = None,
     ):
+        """Initialize inferential runner for one or many binary targets."""
         self.root = Path(root)
         self.INFERENTIAL = df_model.copy()
         self.feature_decisions_df = feature_decisions_df.copy()
         self.task_name = "inferential" if metadata is None else metadata.get("task_name", "inferential")
-        self.target = self._resolve_target_col(target_col)
+        self.targets = self._resolve_target_cols(target_col=target_col, target_cols=target_cols)
+        self.target = self.targets[0]  # legacy alias for notebooks that expect a single target.
         self.scope_statement = INFERENTIAL_SCOPE_STATEMENT
         self.predictor_type_map = self._build_predictor_type_map()
         self.approved_predictors = self.approved_predictor_columns()
         self.effect_size_thresholds = self._build_effect_size_thresholds(effect_size_thresholds)
         self.default_positive_class = default_positive_class
+        # Keep a preview encoding for overview()/print(project).
+        preview_positive = self._resolve_positive_class(default_positive_class, self.target)
         (
             self.target_binary,
             self.target_positive_class,
             self.target_negative_class,
         ) = self._encode_binary_series(
             self.INFERENTIAL[self.target],
-            positive_class=default_positive_class,
+            positive_class=preview_positive,
             series_name=self.target,
         )
 
@@ -134,7 +149,7 @@ class YlivertainenInferential:
             f"{BOLD}{BLUE}🧠  YlivertainenInferential Briefing{RESET}",
             f"{BOLD}{BLUE}{'═' * 64}{RESET}",
             f"{GRAY}📌 Task{RESET}                 {BOLD}{self.task_name}{RESET}",
-            f"{GRAY}🎯 Target{RESET}               {ORANGE}{BOLD}{self.target}{RESET}",
+            f"{GRAY}🎯 Targets{RESET}              {ORANGE}{BOLD}{', '.join(self.targets)}{RESET}",
             f"{GRAY}✅ Positive class{RESET}       {GREEN}{self.target_positive_class!r}{RESET}",
             f"{GRAY}👥 Rows (n){RESET}             {BOLD}{len(self.INFERENTIAL):,}{RESET}",
             f"{GRAY}🧰 Predictors (model){RESET}   {BOLD}{len(model_frame_predictors)}{RESET}",
@@ -156,7 +171,7 @@ class YlivertainenInferential:
             f"{BOLD}{YELLOW}Workflow{RESET}",
             f"{GRAY}•{RESET} test predictor -> binary target only",
             f"{GRAY}•{RESET} skip unsupported, sparse, or degenerate predictors",
-            f"{GRAY}•{RESET} build one tidy table with one row per predictor",
+            f"{GRAY}•{RESET} build one tidy table with one row per target-predictor pair",
             f"{GRAY}•{RESET} color row text by FDR signal and clinical effect",
             f"{GRAY}•{RESET} requires explicit positive class lock by default",
             "",
@@ -183,7 +198,11 @@ class YlivertainenInferential:
             "column_name",
         ].dropna()
         approved = [str(col) for col in approved.tolist()]
-        approved = [col for col in dict.fromkeys(approved) if col in self.INFERENTIAL.columns and col != self.target]
+        approved = [
+            col
+            for col in dict.fromkeys(approved)
+            if col in self.INFERENTIAL.columns and col not in set(self.targets)
+        ]
 
         if len(approved) == 0:
             raise ValueError("No approved predictors found in df_model.")
@@ -206,8 +225,10 @@ class YlivertainenInferential:
     def run_inferential(
         self,
         covariates: Sequence[str] | str | None = None,
+        target_cols: Sequence[str] | str | None = None,
         positive_class=None,
         alpha: float = 0.05,
+        fdr_scope: str = "per_target",
         min_non_missing: int = 10,
         ci_level: float = 0.95,
         n_boot: int = 1000,
@@ -219,8 +240,17 @@ class YlivertainenInferential:
         show_table: bool = False,
         export: bool = False,
     ):
+        """
+        Run inferential screening across approved predictors and selected targets.
+
+        Parameters:
+        - target_cols: explicit one/many target columns. If omitted, uses targets from init.
+        - fdr_scope: "per_target" (default) or "global" BH correction.
+        """
         if clinical_relevance_floor not in {"small", "moderate", "large"}:
             raise ValueError("clinical_relevance_floor must be one of: small, moderate, large.")
+        if fdr_scope not in {"per_target", "global"}:
+            raise ValueError("fdr_scope must be one of: per_target, global.")
         if not 0 < alpha < 1:
             raise ValueError("alpha must be between 0 and 1.")
         if not 0 < ci_level < 1:
@@ -233,83 +263,102 @@ class YlivertainenInferential:
             raise ValueError("outlier_iqr_multiplier must be > 0.")
 
         predictors = self.approved_predictor_columns(covariates)
-        resolved_positive_class = self.default_positive_class if positive_class is None else positive_class
-        if enforce_positive_class_lock and resolved_positive_class is None:
-            raise ValueError(
-                "Explicit target polarity required. Pass positive_class in run_inferential() "
-                "or set default_positive_class in YlivertainenInferential(...)."
-            )
-        y_binary, positive_class, negative_class = self._encode_binary_series(
-            self.INFERENTIAL[self.target],
-            positive_class=resolved_positive_class,
-            series_name=self.target,
-        )
+        targets = self._resolve_target_cols(target_col=None, target_cols=target_cols)
+        self.targets = targets
+        self.target = targets[0]
 
         rows = []
-        for idx, predictor in enumerate(predictors):
-            predictor_kind = self._predictor_kind(predictor)
-            seed = random_state + idx
+        positive_class_by_target: dict[str, object] = {}
+        negative_class_by_target: dict[str, object] = {}
+        prevalence_by_target: dict[str, float] = {}
 
-            if predictor_kind == "numeric":
-                row = self._run_numeric_row(
-                    predictor=predictor,
-                    y_binary=y_binary,
-                    min_non_missing=min_non_missing,
-                    n_boot=n_boot,
-                    ci_level=ci_level,
-                    random_state=seed,
-                    robust_numeric_fallback=robust_numeric_fallback,
-                    outlier_iqr_multiplier=outlier_iqr_multiplier,
-                )
-            elif predictor_kind == "categorical":
-                row = self._run_categorical_row(
-                    predictor=predictor,
-                    y_binary=y_binary,
-                    min_non_missing=min_non_missing,
-                    n_boot=n_boot,
-                    ci_level=ci_level,
-                    random_state=seed,
-                )
-            else:
-                missing_pct = float(self.INFERENTIAL[predictor].isna().mean() * 100.0)
-                non_missing_n = int((self.INFERENTIAL[predictor].notna() & y_binary.notna()).sum())
-                row = self._skip_row(
-                    predictor=predictor,
-                    effect_metric=pd.NA,
-                    test_name=pd.NA,
-                    test_stat=np.nan,
-                    expected_cell_min=np.nan,
-                    expected_cell_lt5_pct=np.nan,
-                    expected_cell_warning=False,
-                    n=non_missing_n,
-                    missing_pct=missing_pct,
-                    skipped_reason="unsupported_predictor_type",
+        for t_idx, target in enumerate(targets):
+            resolved_positive_class = self._resolve_positive_class(positive_class, target)
+            if enforce_positive_class_lock and resolved_positive_class is None:
+                raise ValueError(
+                    f"Explicit target polarity required for target={target}. "
+                    "Pass positive_class in run_inferential() or set default_positive_class."
                 )
 
-            rows.append(row)
+            y_binary, pos_cls, neg_cls = self._encode_binary_series(
+                self.INFERENTIAL[target],
+                positive_class=resolved_positive_class,
+                series_name=target,
+            )
+            positive_class_by_target[target] = pos_cls
+            negative_class_by_target[target] = neg_cls
+            prevalence_by_target[target] = float(y_binary.mean())
+
+            for p_idx, predictor in enumerate(predictors):
+                predictor_kind = self._predictor_kind(predictor)
+                seed = random_state + (t_idx * 10_000) + p_idx
+
+                if predictor_kind == "numeric":
+                    row = self._run_numeric_row(
+                        predictor=predictor,
+                        y_binary=y_binary,
+                        min_non_missing=min_non_missing,
+                        n_boot=n_boot,
+                        ci_level=ci_level,
+                        random_state=seed,
+                        robust_numeric_fallback=robust_numeric_fallback,
+                        outlier_iqr_multiplier=outlier_iqr_multiplier,
+                    )
+                elif predictor_kind == "categorical":
+                    row = self._run_categorical_row(
+                        predictor=predictor,
+                        y_binary=y_binary,
+                        min_non_missing=min_non_missing,
+                        n_boot=n_boot,
+                        ci_level=ci_level,
+                        random_state=seed,
+                    )
+                else:
+                    missing_pct = float(self.INFERENTIAL[predictor].isna().mean() * 100.0)
+                    non_missing_n = int((self.INFERENTIAL[predictor].notna() & y_binary.notna()).sum())
+                    row = self._skip_row(
+                        predictor=predictor,
+                        effect_metric=pd.NA,
+                        test_name=pd.NA,
+                        test_stat=np.nan,
+                        expected_cell_min=np.nan,
+                        expected_cell_lt5_pct=np.nan,
+                        expected_cell_warning=False,
+                        n=non_missing_n,
+                        missing_pct=missing_pct,
+                        skipped_reason="unsupported_predictor_type",
+                    )
+
+                row["target"] = target
+                rows.append(row)
 
         inferential_df = pd.DataFrame(rows, columns=INFERENTIAL_COLS)
         inferential_df = self._apply_fdr_flags(
             inferential_df=inferential_df,
             alpha=alpha,
             clinical_relevance_floor=clinical_relevance_floor,
+            fdr_scope=fdr_scope,
         )
         inferential_df = self._sort_inferential_df(inferential_df)
-        self._qa_gate(inferential_df, expected_predictor_count=len(predictors))
+        self._qa_gate(
+            inferential_df,
+            expected_predictor_count=(len(predictors) * len(targets)),
+        )
 
         self.inferential_results = inferential_df
         self.inferential_table = None
         self.run_metadata = {
             "run_at_utc": datetime.now(timezone.utc).isoformat(),
             "task_name": self.task_name,
-            "target": self.target,
-            "positive_class": positive_class,
-            "negative_class": negative_class,
+            "targets": targets,
+            "positive_class_by_target": positive_class_by_target,
+            "negative_class_by_target": negative_class_by_target,
             "sample_size": int(len(self.INFERENTIAL)),
-            "target_prevalence": float(y_binary.mean()),
+            "target_prevalence_by_target": prevalence_by_target,
             "predictors_tested": predictors,
             "predictors_approved_count": len(self.approved_predictors),
             "alpha": alpha,
+            "fdr_scope": fdr_scope,
             "ci_level": ci_level,
             "min_non_missing": min_non_missing,
             "n_boot": n_boot,
@@ -338,26 +387,45 @@ class YlivertainenInferential:
 
         return styled_table
 
-    # Work out where the target column lives, because sawing into the wrong vessel is frowned upon.
-    def _resolve_target_col(self, target_col: str | None) -> str:
-        if target_col is not None:
-            if target_col not in self.INFERENTIAL.columns:
-                raise ValueError(f"Target column not found in df_model: {target_col}")
-            return target_col
-
-        if {"column_name", "role"}.issubset(self.feature_decisions_df.columns):
+    # Resolve target list from args or feature decisions with legacy single-target fallback.
+    def _resolve_target_cols(
+        self,
+        target_col: str | None,
+        target_cols: Sequence[str] | None,
+    ) -> list[str]:
+        if target_cols is not None:
+            cols = list(dict.fromkeys(target_cols))
+        elif target_col is not None:
+            cols = [target_col]
+        elif {"column_name", "role"}.issubset(self.feature_decisions_df.columns):
             target_rows = self.feature_decisions_df.loc[
                 self.feature_decisions_df["role"] == "target",
                 "column_name",
             ].dropna()
-            target_rows = [str(col) for col in target_rows.tolist() if str(col) in self.INFERENTIAL.columns]
-            if len(target_rows) == 1:
-                return target_rows[0]
+            cols = [str(col) for col in target_rows.tolist()]
+        elif "target" in self.INFERENTIAL.columns:
+            cols = ["target"]
+        else:
+            raise ValueError("Could not resolve target columns from feature_decisions_df or df_model.")
 
-        if "target" in self.INFERENTIAL.columns:
-            return "target"
+        cols = [col for col in cols if col in self.INFERENTIAL.columns]
+        if not cols:
+            raise ValueError("No valid target columns found in df_model.")
+        return cols
 
-        raise ValueError("Could not resolve target column from feature_decisions_df or df_model.")
+    # Backward-compatible resolver used by older notebook code.
+    def _resolve_target_col(self, target_col: str | None) -> str:
+        return self._resolve_target_cols(target_col=target_col, target_cols=None)[0]
+
+    # Resolve positive class for a target from scalar or per-target dict input.
+    def _resolve_positive_class(self, positive_class, target: str):
+        if isinstance(positive_class, dict):
+            return positive_class.get(target)
+        if positive_class is not None:
+            return positive_class
+        if isinstance(self.default_positive_class, dict):
+            return self.default_positive_class.get(target)
+        return self.default_positive_class
 
     # Build a quick lookup so each predictor gets routed to the right test without guessing every time.
     def _build_predictor_type_map(self) -> dict[str, str]:
@@ -958,6 +1026,7 @@ class YlivertainenInferential:
         inferential_df: pd.DataFrame,
         alpha: float,
         clinical_relevance_floor: str,
+        fdr_scope: str = "per_target",
     ) -> pd.DataFrame:
         inferential_df = inferential_df.copy()
         valid_mask = inferential_df["status"].eq("ok") & inferential_df["p_value"].notna()
@@ -967,9 +1036,16 @@ class YlivertainenInferential:
         inferential_df["clinically_relevant"] = False
 
         if valid_mask.any():
-            inferential_df.loc[valid_mask, "p_value_fdr"] = self._benjamini_hochberg(
-                inferential_df.loc[valid_mask, "p_value"]
-            )
+            if fdr_scope == "global":
+                inferential_df.loc[valid_mask, "p_value_fdr"] = self._benjamini_hochberg(
+                    inferential_df.loc[valid_mask, "p_value"]
+                )
+            else:
+                for target, idx in inferential_df.loc[valid_mask].groupby("target").groups.items():
+                    inferential_df.loc[idx, "p_value_fdr"] = self._benjamini_hochberg(
+                        inferential_df.loc[idx, "p_value"]
+                    )
+
             inferential_df.loc[valid_mask, "fdr_significant"] = (
                 inferential_df.loc[valid_mask, "p_value_fdr"] < alpha
             )
@@ -992,8 +1068,8 @@ class YlivertainenInferential:
         inferential_df = inferential_df.copy()
         inferential_df["_effect_abs"] = inferential_df["effect_value"].abs()
         inferential_df = inferential_df.sort_values(
-            by=["fdr_significant", "clinically_relevant", "_effect_abs", "p_value_fdr", "predictor"],
-            ascending=[False, False, False, True, True],
+            by=["target", "fdr_significant", "clinically_relevant", "_effect_abs", "p_value_fdr", "predictor"],
+            ascending=[True, False, False, False, True, True],
             na_position="last",
         ).drop(columns="_effect_abs")
         return inferential_df.reset_index(drop=True)
@@ -1011,8 +1087,6 @@ class YlivertainenInferential:
                     "ci_high": "{:.3f}",
                     "p_value": "{:.4g}",
                     "p_value_fdr": "{:.4g}",
-                    "expected_cell_min": "{:.3f}",
-                    "expected_cell_lt5_pct": "{:.1f}",
                     "missing_pct": "{:.1f}",
                 },
                 na_rep="NA",
@@ -1022,9 +1096,9 @@ class YlivertainenInferential:
     # Enforce the checklist contract before you trust the table.
     def _qa_gate(self, inferential_df: pd.DataFrame, expected_predictor_count: int):
         if len(inferential_df) != expected_predictor_count:
-            raise ValueError("Inferential QA failed: row count does not match tested predictors.")
-        if inferential_df["predictor"].duplicated().any():
-            raise ValueError("Inferential QA failed: duplicate predictors found.")
+            raise ValueError("Inferential QA failed: row count does not match tested target-predictor pairs.")
+        if inferential_df.duplicated(subset=["target", "predictor"]).any():
+            raise ValueError("Inferential QA failed: duplicate target-predictor pairs found.")
         if not inferential_df["predictor"].isin(self.approved_predictors).all():
             raise ValueError("Inferential QA failed: non-approved predictor found in inferential table.")
 

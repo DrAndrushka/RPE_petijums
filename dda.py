@@ -11,6 +11,11 @@ Two output paths:
 
 Both paths use the SAME plotting + table-styling helpers, so what you see
 in the notebook is what you get in the HTML.
+
+TODO:
+- Add optional quiet mode to suppress per-variable console output.
+- Add optional JSON export for dashboard pipelines.
+- Add configurable thresholds for cardinality-driven plot skipping.
 """
 
 from __future__ import annotations
@@ -200,7 +205,10 @@ def _style_overview(df: pd.DataFrame, *, formats: dict):
 # Main class
 # ─────────────────────────────────────────────────────────────────────────────
 class YlivertainenDDA:
+    """Run descriptive analysis for numerical, categorical, and binary columns."""
+
     def __init__(self, task, df: pd.DataFrame):
+        """Store task context and initialize DDA output containers."""
         self.task = task
         self.DDA = df.copy()
         self.cols_to_not_analyse: list[str] = []
@@ -211,6 +219,7 @@ class YlivertainenDDA:
 
     # ── column selection ────────────────────────────────────────────────────
     def keep_from_analysis(self, cols):
+        """Mark columns that should be excluded from DDA scans."""
         if cols:
             self.cols_to_not_analyse.extend(cols)
             print(f"{BOLD}🚫 Kept from analysis:{RESET} {cols}")
@@ -245,6 +254,7 @@ class YlivertainenDDA:
 
     # ── overview ────────────────────────────────────────────────────────────
     def dataset_overview(self):
+        """Print basic shape and dtype summary."""
         print(f"{BOLD}🟧 Rows & columns{RESET}")
         print(f"  📏 rows:    {len(self.DDA)}")
         print(f"  📐 columns: {len(self.DDA.columns)}")
@@ -259,6 +269,7 @@ class YlivertainenDDA:
     # NUMERICAL
     # ════════════════════════════════════════════════════════════════════════
     def analyse_numerical(self):
+        """Profile numerical features and render histogram+boxplot per column."""
         print(f"{BOLD}🔢 ═══════ NUMERICAL ═══════ 🔢{RESET}")
         cols = self._numerical_cols()
         if not cols:
@@ -352,6 +363,7 @@ class YlivertainenDDA:
     # CATEGORICAL
     # ════════════════════════════════════════════════════════════════════════
     def analyse_categorical(self):
+        """Profile categorical features with balance/entropy diagnostics."""
         print(f"{BOLD}🚦 ═══════ CATEGORICAL ═══════ 🚦{RESET}")
         cols = self._categorical_cols()
         if not cols:
@@ -476,6 +488,7 @@ class YlivertainenDDA:
     # BINARY
     # ════════════════════════════════════════════════════════════════════════
     def analyse_binary(self):
+        """Profile binary features with imbalance and entropy diagnostics."""
         print(f"{BOLD}⚖️  ═══════ BINARY ═══════ ⚖️{RESET}")
         cols = self._binary_cols()
         if not cols:
@@ -556,6 +569,7 @@ class YlivertainenDDA:
     # HTML EXPORT — text → graphs → overview table, per category
     # ════════════════════════════════════════════════════════════════════════
     def export_all_overviews(self, output_dir: str = "output"):
+        """Export combined DDA HTML report + CSV/XLSX overviews."""
         vector_dir = os.path.join(output_dir, "figures_svg")
         tables_dir = os.path.join(output_dir, "tables")
         os.makedirs(vector_dir, exist_ok=True)
