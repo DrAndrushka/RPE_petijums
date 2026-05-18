@@ -1,15 +1,28 @@
 """
-Model-frame builder (missingness + leakage governance, no model training).
+missingness_resolution.py
+==========================
+Missingness analysis + MICE imputation.
 
-This module is kept as the "post-EDA preprocessing" step:
-- drop leakage/redundant features based on `feature_decisions_df`
-- run simple/advanced imputation based on `missing_action`
-- assemble analysis-ready frame: predictors + one/many targets
+Stages
+------
+1. analyze_missingness(df)
+   -> per-column missing %, count, pairwise co-missingness matrix (top pairs),
+      saved as table + heatmap SVG.
 
-TODO:
-- Add per-column imputation diagnostics export.
-- Add optional deterministic train/test split snapshot export.
-- Add strict schema validation utility for cross-project portability.
+2. add_missing_flags(df, cols)
+   -> add boolean <col>_missing columns for explicit MNAR/MAR tracking.
+
+3. mice_impute(df, m=10, ...)
+   -> returns a LIST of m imputed DataFrames using sklearn's IterativeImputer
+      (multivariate chained equations). Numeric and categorical predictors are
+      handled separately; categoricals are ordinal-encoded for imputation and
+      decoded back.
+
+4. simple_impute(df)
+   -> single-frame imputation for fast screening (median for numeric, mode for
+      categorical). Use only for exploratory work, not for final inference.
+
+Outputs saved under output/missingness/{figures,tables}.
 """
 
 from __future__ import annotations
@@ -17,294 +30,206 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from IPython.display import Markdown, display
-from sklearn.ensemble import RandomForestRegressor
+import seaborn as sns
 from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
+from sklearn.ensemble import RandomForestRegressor
 
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", None)
-
-# ANSI colors for notebook console summaries.
-BOLD = "\033[1m"
-BLUE = "\033[38;5;39m"
-GREEN = "\033[38;5;28m"
-GRAY = "\033[38;5;245m"
-RESET = "\033[0m"
+from schema_infer import ColSpec
 
 
-def _resolve_targets(
-    df: pd.DataFrame,
-    feature_decisions_df: pd.DataFrame,
-    target_col: str | None,
-    target_cols: Sequence[str] | None,
-) -> list[str]:
-    """Resolve analysis targets from explicit args or feature decision roles."""
-    if target_cols is not None:
-        targets = list(dict.fromkeys(target_cols))
-    elif target_col is not None:
-        targets = [target_col]
-    else:
-        targets = (
-            feature_decisions_df.loc[feature_decisions_df.role == "target", "column_name"]
-            .dropna()
-            .astype(str)
-            .tolist()
+def _ensure_dirs(root: Path) -> tuple[Path, Path]:
+    figs = root / "missingness" / "figures"
+    tabs = root / "missingness" / "tables"
+    figs.mkdir(parents=True, exist_ok=True)
+    tabs.mkdir(parents=True, exist_ok=True)
+    return figs, tabs
+
+
+# ---------------------------------------------------------------------------
+# 1. Missingness analysis
+# ---------------------------------------------------------------------------
+
+def analyze_missingness(df: pd.DataFrame, *, output_root: Path | str = "output") -> pd.DataFrame:
+    """
+    Per-column missing summary + co-missingness heatmap (saved as SVG).
+    Returns the per-column table.
+    """
+    figs, tabs = _ensure_dirs(Path(output_root))
+
+    miss = df.isna()
+    per_col = pd.DataFrame({
+        "column": df.columns,
+        "n_missing": miss.sum().values,
+        "pct_missing": (miss.mean() * 100).round(2).values,
+    }).sort_values("pct_missing", ascending=False).reset_index(drop=True)
+    per_col.to_csv(tabs / "missing_per_column.csv", index=False)
+
+    # Bar chart
+    if (per_col["pct_missing"] > 0).any():
+        plot_df = per_col[per_col["pct_missing"] > 0]
+        fig, ax = plt.subplots(figsize=(7, max(3, 0.35 * len(plot_df))))
+        sns.barplot(x="pct_missing", y="column", data=plot_df, ax=ax, color="#e76f51")
+        ax.set_title("Missing % per column"); ax.set_xlabel("% missing")
+        fig.tight_layout()
+        fig.savefig(figs / "missing_per_column.svg", format="svg", bbox_inches="tight")
+        plt.close(fig)
+
+    # Co-missingness heatmap (Jaccard over missing rows)
+    cols_with_miss = per_col[per_col["pct_missing"] > 0]["column"].tolist()
+    if len(cols_with_miss) >= 2:
+        m = miss[cols_with_miss].astype(int)
+        inter = m.T @ m
+        union = (m.values[:, :, None] | m.values[:, None, :]).sum(axis=0)
+        jacc = pd.DataFrame(
+            np.where(union > 0, inter.values / np.where(union == 0, 1, union), 0),
+            index=cols_with_miss, columns=cols_with_miss,
         )
-    targets = [t for t in targets if t in df.columns]
-    if not targets:
-        raise ValueError("No valid target columns found in dataframe.")
-    return targets
+        jacc.to_csv(tabs / "co_missingness_jaccard.csv")
+        fig, ax = plt.subplots(figsize=(0.6 * len(cols_with_miss) + 2,
+                                        0.6 * len(cols_with_miss) + 2))
+        sns.heatmap(jacc, annot=True, fmt=".2f", cmap="Reds", ax=ax, cbar=True)
+        ax.set_title("Co-missingness (Jaccard)")
+        fig.tight_layout()
+        fig.savefig(figs / "co_missingness_heatmap.svg", format="svg", bbox_inches="tight")
+        plt.close(fig)
+
+    return per_col
 
 
-def _resolve_predictors(
-    df: pd.DataFrame,
-    feature_decisions_df: pd.DataFrame,
-    targets: Sequence[str],
-    predictor_cols: Sequence[str] | None,
-) -> list[str]:
-    """Resolve predictor set (explicit whitelist has priority)."""
-    if predictor_cols is not None:
-        predictors = list(dict.fromkeys(predictor_cols))
-        missing = [c for c in predictors if c not in df.columns]
-        if missing:
-            raise ValueError(f"Requested predictors not found: {missing}")
-    else:
-        predictors = (
-            feature_decisions_df.loc[
-                (feature_decisions_df.role == "predictor") & (feature_decisions_df.action != "drop"),
-                "column_name",
-            ]
-            .dropna()
-            .astype(str)
-            .tolist()
-        )
-    predictors = [c for c in predictors if c in df.columns and c not in set(targets)]
-    if not predictors:
-        raise ValueError("No predictor columns resolved after filtering.")
-    return predictors
+# ---------------------------------------------------------------------------
+# 2. Missing flags
+# ---------------------------------------------------------------------------
 
-
-def _highlight_feature_row(row: pd.Series) -> list[str]:
-    """Color rows in feature decision table for quick visual triage."""
-    drop_color = "#818181"
-    simple_impute_color = "#CBB255"
-    advanced_impute_color = "#D4605C"
-    predictor_color = "#1E9101"
-    target_color = "#FF8C00"
-
-    if row["action"] == "drop":
-        return [f"color: {drop_color};"] * len(row)
-    if row["missing_action"] == "simple_impute":
-        return [f"color: {simple_impute_color};"] * len(row)
-    if row["missing_action"] == "advanced_impute":
-        return [f"color: {advanced_impute_color};"] * len(row)
-    if row["role"] == "predictor":
-        return [f"color: {predictor_color};"] * len(row)
-    if row["role"] == "target":
-        return [f"color: {target_color};"] * len(row)
-    return [""] * len(row)
-
-
-def _drop_flagged_columns(df: pd.DataFrame, drop_cols: Sequence[str]) -> pd.DataFrame:
-    """Drop known-bad columns (leakage/redundancy) if they exist."""
-    keep_drop_cols = [c for c in drop_cols if c in df.columns]
-    if keep_drop_cols:
-        print(f"{BOLD}{GRAY}Dropping flagged columns:{RESET} {keep_drop_cols}")
-        return df.drop(columns=keep_drop_cols)
-    return df
-
-
-def _simple_impute(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
-    """Simple imputation: mode for categorical-like, median for numeric."""
-    for col in cols:
-        if col not in df.columns:
+def add_missing_flags(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
+    """Add <col>_missing boolean columns for the specified columns."""
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
             continue
-        s = df[col]
-        if s.isna().sum() == 0:
+        out[f"{c}_missing"] = out[c].isna().astype("boolean")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 3. MICE imputation (multiple imputation)
+# ---------------------------------------------------------------------------
+
+def _encode_for_impute(df: pd.DataFrame, schema: dict[str, ColSpec]):
+    """Encode categoricals to integer codes for the imputer; remember mapping."""
+    work = df.copy()
+    decoders: dict[str, dict[int, object]] = {}
+    cat_cols = []
+    for col, spec in schema.items():
+        if col not in work.columns:
             continue
-        is_cat = pd.api.types.is_categorical_dtype(s) or pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)
-        if is_cat:
-            mode_series = s.dropna().mode()
-            if mode_series.empty:
-                continue
-            df[col] = s.fillna(mode_series.iloc[0])
-            print(f'{GRAY}- "{col}" imputed with mode{RESET}')
-        else:
-            median = s.dropna().median()
-            df[col] = s.fillna(median)
-            print(f'{GRAY}- "{col}" imputed with median{RESET}')
-    return df
+        if spec.kind in ("ordinal", "nominal"):
+            cats = pd.Categorical(work[col])
+            decoders[col] = dict(enumerate(cats.categories))
+            work[col] = pd.Series(cats.codes, index=work.index).replace(-1, np.nan)
+            cat_cols.append(col)
+        elif spec.kind == "binary":
+            work[col] = work[col].astype("float")
+            cat_cols.append(col)
+    # keep only numeric / coded columns for imputation
+    drop = [c for c, sp in schema.items()
+            if sp.kind in ("id", "text", "datetime", "skip") and c in work.columns]
+    work = work.drop(columns=drop, errors="ignore")
+    return work, decoders, cat_cols, drop
 
 
-def _advanced_impute(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
-    """Advanced numeric imputation via IterativeImputer + RandomForestRegressor."""
-    numeric_cols = []
-    fallback_cols = []
-    for col in cols:
-        if col not in df.columns:
-            continue
-        s = df[col]
-        if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
-            numeric_cols.append(col)
-        else:
-            fallback_cols.append(col)
-
-    if fallback_cols:
-        print(f"{GRAY}Advanced-impute fallback to simple for non-numeric: {fallback_cols}{RESET}")
-        df = _simple_impute(df, fallback_cols)
-
-    if not numeric_cols:
-        return df
-
-    original_dtypes = df.loc[:, numeric_cols].dtypes
-    X = df.loc[:, numeric_cols].to_numpy(dtype=float)
-    imputer = IterativeImputer(
-        estimator=RandomForestRegressor(
-            n_estimators=50,
-            random_state=0,
-            n_jobs=-1,
-        ),
-        max_iter=10,
-        random_state=0,
-    )
-    X_imp = imputer.fit_transform(X)
-    X_imp_df = pd.DataFrame(X_imp, columns=numeric_cols, index=df.index)
-
-    for col in numeric_cols:
-        orig_dtype = original_dtypes[col]
-        if pd.api.types.is_integer_dtype(orig_dtype):
-            floored = np.floor(X_imp_df[col])
-            if pd.api.types.is_extension_array_dtype(orig_dtype):
-                df.loc[:, col] = floored.astype("int64")
-            else:
-                df.loc[:, col] = floored.astype(orig_dtype)
-        else:
-            df.loc[:, col] = X_imp_df[col]
-    return df
-
-
-def build_model_frame(
-    root: Path,
-    post_cohort_df: pd.DataFrame,
-    feature_decisions_df: pd.DataFrame,
-    metadata: dict,
-    target_col: str | None = None,
-    target_cols: Sequence[str] | None = None,
-    predictor_cols: Sequence[str] | None = None,
-    export: bool = False,
+def _decode_after_impute(
+    imputed: pd.DataFrame,
+    decoders: dict[str, dict[int, object]],
+    cat_cols: list[str],
+    schema: dict[str, ColSpec],
 ) -> pd.DataFrame:
-    """
-    Build analysis-ready dataframe (predictors + targets) after missingness handling.
-
-    Parameters:
-    - target_col / target_cols: choose one or many targets.
-    - predictor_cols: explicit predictor whitelist (optional).
-    - export: save output to `data/processed`.
-    """
-    display(feature_decisions_df.style.apply(_highlight_feature_row, axis=1))
-
-    df = post_cohort_df.copy()
-    targets = _resolve_targets(df, feature_decisions_df, target_col=target_col, target_cols=target_cols)
-    predictors = _resolve_predictors(df, feature_decisions_df, targets=targets, predictor_cols=predictor_cols)
-
-    drop_cols = (
-        feature_decisions_df.loc[
-            (feature_decisions_df.drop_reason == "leakage") | (feature_decisions_df.action == "drop"),
-            "column_name",
-        ]
-        .dropna()
-        .astype(str)
-        .tolist()
-    )
-
-    simple_impute_cols = (
-        feature_decisions_df.loc[feature_decisions_df.missing_action == "simple_impute", "column_name"]
-        .dropna()
-        .astype(str)
-        .tolist()
-    )
-    advanced_impute_cols = (
-        feature_decisions_df.loc[feature_decisions_df.missing_action == "advanced_impute", "column_name"]
-        .dropna()
-        .astype(str)
-        .tolist()
-    )
-
-    print("═" * 90)
-    df = _drop_flagged_columns(df, drop_cols)
-    df = _simple_impute(df, simple_impute_cols)
-    df = _advanced_impute(df, advanced_impute_cols)
-    print("═" * 90)
-
-    important_missing_flags = (
-        feature_decisions_df.loc[
-            (feature_decisions_df.role == "predictor")
-            & (feature_decisions_df.action != "drop")
-            & (feature_decisions_df.notes.fillna("").str.contains("high_missingness_flag_important", regex=False)),
-            "column_name",
-        ]
-        .dropna()
-        .astype(str)
-        .map(lambda c: f"{c}_missing")
-        .tolist()
-    )
-    important_missing_flags = [c for c in important_missing_flags if c in df.columns]
-
-    x_cols = list(dict.fromkeys([*predictors, *important_missing_flags]))
-    y_cols = [c for c in targets if c in df.columns]
-    df_model = pd.concat([df[x_cols], df[y_cols]], axis=1)
-
-    task_name = metadata.get("task_name", "unknown_task")
-    positive_cls = metadata.get("positive_class", "—")
-    df_rows, df_cols = df_model.shape
-    predictor_count = len(x_cols)
-
-    prevalence_lines = []
-    for tgt in y_cols:
-        if pd.api.types.is_bool_dtype(df_model[tgt]) or df_model[tgt].dropna().nunique() == 2:
-            prevalence = float(pd.to_numeric(df_model[tgt], errors="coerce").mean())
-            prevalence_lines.append(f"- `{tgt}` prevalence: **{prevalence:.3f}**")
+    out = imputed.copy()
+    for col in cat_cols:
+        if col not in out.columns:
+            continue
+        spec = schema[col]
+        if spec.kind == "binary":
+            out[col] = (out[col] >= 0.5).astype("boolean")
         else:
-            prevalence_lines.append(f"- `{tgt}` prevalence: _not binary_")
+            codes = out[col].round().clip(lower=0, upper=max(decoders[col]) if decoders[col] else 0)
+            out[col] = codes.map(decoders[col])
+            levels = spec.ordered_levels if spec.kind == "ordinal" else list(decoders[col].values())
+            out[col] = pd.Categorical(out[col], categories=levels, ordered=(spec.kind == "ordinal"))
+    return out
 
-    display(
-        Markdown(
-            f"""
-# Final Model-Frame Summary
 
-Task: **`{task_name}`**  
-Positive class hint: **`{positive_cls}`**
+def mice_impute(
+    df: pd.DataFrame,
+    schema: dict[str, ColSpec],
+    *,
+    m: int = 10,
+    max_iter: int = 10,
+    random_state: int = 42,
+    output_root: Path | str = "output",
+) -> list[pd.DataFrame]:
+    """
+    Generate `m` imputed datasets via sklearn IterativeImputer with different
+    random seeds (sample_posterior=True). Returns a list of m DataFrames with
+    the same columns as the original (datetime/id/text columns are passed
+    through unchanged from the original df).
+    """
+    figs, tabs = _ensure_dirs(Path(output_root))
 
-### Cohort Snapshot
-- Rows: **{df_rows:,}**
-- Columns: **{df_cols}**
-- Predictors kept: **{predictor_count}**
-- Targets kept: **{len(y_cols)}**
+    work, decoders, cat_cols, dropped = _encode_for_impute(df, schema)
+    if work.isna().sum().sum() == 0:
+        # nothing to impute -> return m copies
+        return [df.copy() for _ in range(m)]
 
-### Target prevalence
-{chr(10).join(prevalence_lines) if prevalence_lines else "- _No targets resolved_"}
-"""
+    imputed_frames: list[pd.DataFrame] = []
+    for i in range(m):
+        imputer = IterativeImputer(
+            estimator=RandomForestRegressor(n_estimators=50, n_jobs=-1,
+                                            random_state=random_state + i),
+            max_iter=max_iter,
+            sample_posterior=False,  # RF estimator doesn't support posterior
+            random_state=random_state + i,
         )
-    )
+        arr = imputer.fit_transform(work)
+        imp = pd.DataFrame(arr, columns=work.columns, index=work.index)
+        decoded = _decode_after_impute(imp, decoders, cat_cols, schema)
+        # bring back untouched columns from the original df
+        for c in dropped:
+            if c in df.columns:
+                decoded[c] = df[c].values
+        # restore column order
+        decoded = decoded.reindex(columns=df.columns)
+        imputed_frames.append(decoded)
 
-    print("═" * 70)
-    print(f"{BOLD}MODEL FRAME ONLINE{RESET}")
-    print("─" * 70)
-    total_nans = int(df_model.isna().sum().sum())
-    nan_pct = (total_nans / (df_rows * df_cols)) * 100 if df_rows and df_cols else 0.0
-    print(f"{GREEN}Shape:{RESET} {df_rows} rows x {df_cols} cols")
-    print(f"{GREEN}Remaining NaNs:{RESET} {total_nans} ({nan_pct:0.2f}%)")
-    display(df_model.head())
+    pd.DataFrame([{"m": m, "max_iter": max_iter, "random_state": random_state}]) \
+      .to_csv(tabs / "mice_config.csv", index=False)
+    return imputed_frames
 
-    if export:
-        model_frame_path = Path(root) / "data" / "processed" / f"(model_frame){task_name}.pickle"
-        model_frame_path.parent.mkdir(parents=True, exist_ok=True)
-        df_model.to_pickle(model_frame_path)
-        print(f"{GREEN}Saved model frame:{RESET} {BOLD}{model_frame_path}{RESET}")
-    else:
-        print(f"{GRAY}Set export=True to save model frame in data/processed.{RESET}")
 
-    return df_model
+# ---------------------------------------------------------------------------
+# 4. Simple imputation (fallback / screening)
+# ---------------------------------------------------------------------------
+
+def simple_impute(df: pd.DataFrame, schema: dict[str, ColSpec]) -> pd.DataFrame:
+    """Median for numeric/ordinal/count, mode for nominal/binary. One frame."""
+    out = df.copy()
+    for col, spec in schema.items():
+        if col not in out.columns or out[col].isna().sum() == 0:
+            continue
+        if spec.kind in ("continuous", "count"):
+            out[col] = out[col].fillna(out[col].median())
+        elif spec.kind == "ordinal":
+            # use mode of the underlying codes
+            cats = pd.Categorical(out[col])
+            mode_code = pd.Series(cats.codes).replace(-1, np.nan).mode()
+            if len(mode_code):
+                fill = cats.categories[int(mode_code.iloc[0])]
+                out[col] = out[col].fillna(fill)
+        elif spec.kind in ("nominal", "binary"):
+            mode = out[col].mode(dropna=True)
+            if len(mode):
+                out[col] = out[col].fillna(mode.iloc[0])
+    return out
