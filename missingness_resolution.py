@@ -101,16 +101,161 @@ def analyze_missingness(df: pd.DataFrame, *, output_root: Path | str = "output")
 
 
 # ---------------------------------------------------------------------------
-# 2. Missing flags
+# 2a. Structural-missing handling (NOT to be imputed)
 # ---------------------------------------------------------------------------
 
-def add_missing_flags(df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
-    """Add <col>_missing boolean columns for the specified columns."""
+def mark_structural_missing(
+    df: pd.DataFrame,
+    schema: dict[str, ColSpec],
+    groups: dict[str, dict],
+) -> pd.DataFrame:
+    """
+    Tell the pipeline which NaNs are *structural* (the value does not exist —
+    e.g. lesion_2_MRI_PIRADS is NaN because the MRI showed only one lesion)
+    rather than truly missing.
+
+    Structural columns are marked ``kind='skip'`` so they are excluded from
+    MICE imputation, EDA screening, and the multivariable model. In their
+    place this helper can derive two real features per group:
+
+      - ``<group_name>``      : count of non-null columns (e.g. n_lesions=0..3)
+      - ``<group_name>_max``  : max value across columns (the "dominant" item;
+                                only sensible when the columns are ordinal/numeric)
+
+    Parameters
+    ----------
+    groups : dict like ::
+
+        {
+          'n_lesions_MRI': {
+              'cols':         ['lesion_1_MRI_PIRADS',
+                               'lesion_2_MRI_PIRADS',
+                               'lesion_3_MRI_PIRADS'],
+              'derive_count': True,
+              'derive_max':   True,
+              'count_levels': [0, 1, 2, 3],
+              'max_levels':   [1, 2, 3, 4, 5],
+              'skip_after':   ['lesion_2_MRI_PIRADS',
+                               'lesion_3_MRI_PIRADS'],
+          },
+        }
+
+    Returns
+    -------
+    DataFrame with derived columns appended. ``schema`` is mutated in place
+    (new ColSpecs added; ``skip_after`` columns flipped to ``kind='skip'``).
+    """
+    out = df.copy()
+    for group_name, cfg in groups.items():
+        cols = [c for c in cfg.get('cols', []) if c in out.columns]
+        if not cols:
+            continue
+
+        if cfg.get('derive_count', True):
+            out[group_name] = out[cols].notna().sum(axis=1).astype('Int64')
+            levels = cfg.get('count_levels')
+            schema[group_name] = ColSpec(
+                name=group_name,
+                kind='ordinal',
+                ordered_levels=levels if levels is not None
+                else sorted(out[group_name].dropna().unique().tolist()),
+                note=f'structural count over {cols}',
+            )
+
+        if cfg.get('derive_max', True):
+            max_name = f"{group_name}_max"
+            try:
+                numeric_view = out[cols].apply(pd.to_numeric, errors='coerce')
+                out[max_name] = numeric_view.max(axis=1)
+                levels = cfg.get('max_levels')
+                schema[max_name] = ColSpec(
+                    name=max_name,
+                    kind='ordinal',
+                    ordered_levels=levels if levels is not None
+                    else sorted(out[max_name].dropna().unique().tolist()),
+                    note=f'structural max over {cols}',
+                )
+            except Exception:
+                pass  # non-numeric group — skip the max
+
+        for c in cfg.get('skip_after', []):
+            if c in schema:
+                schema[c].kind = 'skip'
+                schema[c].note = (schema[c].note or '') + ' [structural-missing, derived above]'
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 2b. Missing flags (for true MNAR columns)
+# ---------------------------------------------------------------------------
+
+def add_missing_flags(
+    df: pd.DataFrame,
+    cols: Sequence[str],
+    schema: dict[str, ColSpec] | None = None,
+) -> pd.DataFrame:
+    """
+    Add <col>_missing boolean columns for true-MNAR columns.
+    If ``schema`` is passed, the new flag columns are registered as binary
+    ColSpecs automatically.
+    """
     out = df.copy()
     for c in cols:
         if c not in out.columns:
             continue
-        out[f"{c}_missing"] = out[c].isna().astype("boolean")
+        flag = f"{c}_missing"
+        out[flag] = out[c].isna().astype("boolean")
+        if schema is not None and flag not in schema:
+            schema[flag] = ColSpec(name=flag, kind='binary',
+                                   note=f'MNAR flag for {c}')
+    return out
+
+
+def drop_rows(
+    df: pd.DataFrame,
+    *,
+    mask: "pd.Series | None" = None,
+    where: "str | None" = None,
+    reason: str = '',
+    log: "list | None" = None,
+) -> pd.DataFrame:
+    """
+    Remove rows from the dataframe with an audit trail.
+
+    Provide EITHER a boolean ``mask`` (True = drop) OR a pandas ``query`` string
+    in ``where`` (rows matching the query are dropped).
+
+    If ``log`` is passed (a list), an entry is appended describing the drop —
+    useful for reproducibility / methods-section reporting.
+
+    Example::
+
+        drop_log = []
+        df = drop_rows(df, where='age < 18', reason='paediatric record',
+                       log=drop_log)
+        df = drop_rows(df, mask=df['preop_PSA'] < 0,
+                       reason='negative PSA = data entry error',
+                       log=drop_log)
+        pd.DataFrame(drop_log)
+    """
+    if mask is None and where is None:
+        raise ValueError("Pass either mask= or where=")
+    if where is not None:
+        drop_mask = df.eval(where)
+    else:
+        drop_mask = mask.reindex(df.index, fill_value=False).astype(bool)
+
+    n_before = len(df)
+    out = df.loc[~drop_mask].copy()
+    n_after = len(out)
+    if log is not None:
+        log.append({
+            'reason': reason,
+            'criterion': where if where is not None else 'mask',
+            'n_dropped': n_before - n_after,
+            'n_remaining': n_after,
+        })
     return out
 
 

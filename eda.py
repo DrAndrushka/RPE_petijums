@@ -40,6 +40,7 @@ from scipy.stats import (
 )
 
 from schema_infer import ColSpec
+from cleaning import format_table_for_csv as _format_table_for_csv  # CSV display-only rounding
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +288,7 @@ def screen_associations(
 
     out = pd.DataFrame(rows)
     if out.empty:
-        out.to_csv(tabs_dir / "associations.csv", index=False)
+        _format_table_for_csv(out).to_csv(tabs_dir / "associations.csv", index=False)
         return out
 
     # FDR per target
@@ -301,5 +302,6 @@ def screen_associations(
             "fdr_significant", "effect", "effect_label", "direction",
             "n_used", "positive_class"]
     out = out[cols].sort_values(["target", "p_fdr"]).reset_index(drop=True)
-    out.to_csv(tabs_dir / "associations.csv", index=False)
+    # display-only rounding: integers stay int, fractions -> 3 sig figs (raw df returned)
+    _format_table_for_csv(out).to_csv(tabs_dir / "associations.csv", index=False)
     return out

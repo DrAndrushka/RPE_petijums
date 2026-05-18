@@ -22,6 +22,139 @@ from schema_infer import ColSpec
 
 
 # ---------------------------------------------------------------------------
+# Display formatting helpers (CSV save only — do NOT apply to in-memory dfs
+# used by downstream stages, since this converts numerics to display strings
+# and would corrupt further math).
+#
+# Column-aware rules (Andy's spec, 2026-05-18):
+#   p-values            : p < 0.001 -> "<0.001";  else 3 decimal places
+#   counts (n_*, n)     : integer
+#   percentages (*_pct, missing_pct, pct_*)      : 1 decimal
+#   means/medians/SD/IQR/quantiles               : 2 decimals
+#   correlations / effect sizes / OR / CI bounds : 2 decimals
+#   entropy / balance / imbalance metrics        : 2 decimals
+#   fallback for any other numeric               : 3 decimals
+# Integer-valued floats (e.g. 5.0) always render as int regardless of rule.
+# ---------------------------------------------------------------------------
+
+def _classify_column(name: str) -> str:
+    """Return the rule key for a column name. Falls back to 'default'.
+
+    Resolution order is deliberate:
+      1. p-values (exact match avoids matching every column containing 'p')
+      2. counts (exact 'n' or starts/ends with 'n_'/'_n', plus df/count tokens)
+      3. entropy/balance/imbalance BEFORE central (so 'max_class_imbalance'
+         is not captured by 'max')
+      4. percent
+      5. effect (OR/CI/coef/SE/stat/VIF)
+      6. central tendency / spread
+      7. fallback to 'default'
+
+    Tokens like 'mode' or 'first_mode' refer to a category label (string),
+    not a numeric statistic, so they intentionally fall through to 'default'.
+    """
+    n = name.lower()
+
+    # 1. p-value (exact / suffix)
+    if n in ("p", "p_fdr", "p_value", "pvalue") or n.endswith("_p") or n.endswith("_pvalue"):
+        return "pvalue"
+
+    # 2. count (whole-word / boundary based, not substring — avoids 'continuous'->count)
+    count_exact = {"n", "df", "n_rows", "n_cols", "n_cols_analysed", "n_unique",
+                   "n_used", "n_models", "n_nonmissing", "n_missing", "count"}
+    if n in count_exact or n.startswith("n_") or n.endswith("_n") or n.endswith("_count"):
+        return "count"
+
+    # 3. entropy / balance / imbalance (BEFORE central so 'max_class_imbalance' wins)
+    for tok in ("entropy", "imbalance", "balance"):
+        if tok in n:
+            return "entropy"
+
+    # 4. percent
+    for tok in ("pct", "percent"):
+        if tok in n:
+            return "percent"
+
+    # 5. effect / stat / OR / CI
+    effect_tokens = ("or_ci_lo", "or_ci_hi", "ci_lo", "ci_hi",
+                     "coef", "vif", "r2", "auc", "effect", "stat")
+    if n in ("or", "hr", "rr", "se"):
+        return "effect"
+    for tok in effect_tokens:
+        if tok in n:
+            return "effect"
+
+    # 6. central tendency / spread — 'mode'/'first_mode'/'second_mode' are category
+    # labels (strings), so they are excluded here and stay 'default'.
+    central_tokens = ("trimmed_mean", "mean", "median", "std", "sd",
+                      "iqr", "min", "max", "p_5th", "p_95th",
+                      "cv", "skew", "kurt")
+    for tok in central_tokens:
+        if tok in n:
+            return "central"
+
+    return "default"
+
+
+def _format_value(x, rule: str) -> object:
+    """Format one numeric value according to a rule key."""
+    if x is None:
+        return x
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+    if not isinstance(x, (float, np.floating)):
+        return x
+    if not np.isfinite(x):
+        return x  # NaN / inf preserved
+
+    # p-value special string formatting
+    if rule == "pvalue":
+        if x < 0.001:
+            return "<0.001"
+        return float(f"{x:.3f}")
+
+    # counts: round to int (defensive — already int in most cases)
+    if rule == "count":
+        return int(round(x))
+
+    decimals = {
+        "percent": 1,
+        "central": 2,
+        "effect":  2,
+        "entropy": 2,
+        "default": 3,
+    }.get(rule, 3)
+
+    rounded = round(float(x), decimals)
+    # Integer-valued floats render as int (avoids '5.0', '12.00')
+    if rounded == int(rounded):
+        return int(rounded)
+    return rounded
+
+
+def format_number(x, rule: str = "default") -> object:
+    """Format a single value. Use `rule` to override classification."""
+    return _format_value(x, rule)
+
+
+def format_table_for_csv(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of `df` with numeric cells formatted per column-name rules.
+
+    Object/string columns are untouched. Use right before `.to_csv(...)`; never
+    assign back into the working DataFrame used by downstream stages.
+    """
+    out = df.copy()
+    for col in out.columns:
+        if not pd.api.types.is_numeric_dtype(out[col]):
+            continue
+        rule = _classify_column(str(col))
+        out[col] = out[col].map(lambda v, r=rule: _format_value(v, r))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Schema application
 # ---------------------------------------------------------------------------
 

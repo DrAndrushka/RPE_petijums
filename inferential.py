@@ -44,6 +44,7 @@ from scipy.stats import t as t_dist
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 from schema_infer import ColSpec
+from cleaning import format_table_for_csv as _format_table_for_csv  # CSV display-only rounding
 
 
 def _ensure_dirs(root: Path) -> tuple[Path, Path]:
@@ -298,8 +299,9 @@ def run_inferential(
             positive_class=positive_class.get(target),
             vif_threshold=vif_threshold,
         )
-        pooled_df.to_csv(tabs_dir / f"{target}__multivariable.csv", index=False)
-        vif_df.to_csv(tabs_dir / f"{target}__vif.csv", index=False)
+        # display-only rounding on save; raw df kept for downstream concat/plots
+        _format_table_for_csv(pooled_df).to_csv(tabs_dir / f"{target}__multivariable.csv", index=False)
+        _format_table_for_csv(vif_df).to_csv(tabs_dir / f"{target}__vif.csv", index=False)
         _forest_plot(pooled_df, target, figs_dir)
         all_rows.append(pooled_df)
 
@@ -309,5 +311,5 @@ def run_inferential(
     cols = ["target", "predictor_col", "or", "or_ci_lo", "or_ci_hi",
             "coef", "se", "p", "df", "n_models"]
     combined = combined[[c for c in cols if c in combined.columns]]
-    combined.to_csv(tabs_dir / "inferential_summary.csv", index=False)
+    _format_table_for_csv(combined).to_csv(tabs_dir / "inferential_summary.csv", index=False)
     return combined
