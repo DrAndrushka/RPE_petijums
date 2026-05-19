@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +12,7 @@ import pandas as pd
 from cleaning import apply_schema
 from eda import _encode_binary_target
 from inferential import _build_design, _encode_target, _safe_z_denominator
-from report import _rel_href
+from report import _embed_svg_src, svg_grid
 from schema_infer import ColSpec, infer_schema
 
 
@@ -87,18 +86,18 @@ class TestSchemaAndCleaning(unittest.TestCase):
       apply_schema(df, schema)
 
 
-class TestReportPaths(unittest.TestCase):
-  def test_rel_href_sibling_output_folders(self):
+class TestReportEmbed(unittest.TestCase):
+  def test_svg_embedded_as_data_uri(self):
     with tempfile.TemporaryDirectory() as tmp:
-      root = Path(tmp)
-      report_dir = root / "report"
-      fig_dir = root / "dda" / "figures"
-      report_dir.mkdir(parents=True)
-      fig_dir.mkdir(parents=True)
-      fig = fig_dir / "x__hist.svg"
-      fig.write_text("<svg/>")
-      rel = _rel_href(fig, report_dir)
-      self.assertEqual(rel, os.path.join("..", "dda", "figures", "x__hist.svg"))
+      fig = Path(tmp) / "plot.svg"
+      fig.write_text('<svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>')
+      uri = _embed_svg_src(fig)
+      self.assertIsNotNone(uri)
+      self.assertTrue(uri.startswith("data:image/svg+xml;base64,"))
+      html = svg_grid([fig])
+      self.assertIn("data:image/svg+xml;base64,", html)
+      self.assertNotIn("../", html)
+      self.assertNotIn("file://", html)
 
 
 if __name__ == "__main__":

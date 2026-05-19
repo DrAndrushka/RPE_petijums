@@ -15,8 +15,8 @@ Design rules
   No Jinja, no AI, no network calls.
 * Missing artifacts produce yellow / red warning boxes; rendering continues
   for everything that *is* available.
-* Folder layout (relative ``figures/`` links) is the default. A single
-  self-contained HTML with base64-embedded SVGs can be added later.
+* All SVG figures are embedded inline (base64 data URIs) so a single
+  ``report.html`` opens anywhere with no sibling ``figures/`` folders.
 
 CLI
 ---
@@ -37,10 +37,10 @@ If ``--schema`` is omitted the report falls back to ``output/schema/schema_summa
 from __future__ import annotations
 
 import argparse
+import base64
 import html as _html
 import json
 import math
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -380,9 +380,24 @@ details.collapsible > summary {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _rel_href(path: Path, base_dir: Path) -> str:
-    """Path from ``base_dir`` (report.html parent) to ``path`` for portable ``src`` attrs."""
-    return os.path.relpath(path.resolve(), start=base_dir.resolve())
+def _embed_svg_src(path: Path) -> str | None:
+    """Return a ``data:image/svg+xml;base64,...`` URI for embedding in ``<img src>``."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if not data.strip():
+        return None
+    encoded = base64.standard_b64encode(data).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def _figure_img_html(path: Path) -> str:
+    """``<img>`` tag with the SVG inlined as a data URI (self-contained HTML)."""
+    src = _embed_svg_src(path)
+    if src is None:
+        return ""
+    return f'<img src="{src}" alt="{_esc(path.stem)}" loading="lazy"/>'
 
 
 def _esc(x: Any) -> str:
@@ -603,13 +618,8 @@ def table_to_html(df: pd.DataFrame, *, row_class_fn=None,
             f'<tbody>{body}</tbody></table>')
 
 
-def svg_grid(svg_paths: Iterable[Path], rel_base: Path,
-             max_n: int | None = None) -> str:
-    """Render an HTML grid of SVG figures.
-
-    ``rel_base`` is the directory containing the final ``report.html``; figure
-    paths are written relative to it so the report stays portable.
-    """
+def svg_grid(svg_paths: Iterable[Path], max_n: int | None = None) -> str:
+    """Render an HTML grid of SVG figures embedded as base64 data URIs."""
     paths = [p for p in svg_paths if p.exists()]
     if max_n is not None:
         paths = paths[:max_n]
@@ -617,25 +627,30 @@ def svg_grid(svg_paths: Iterable[Path], rel_base: Path,
         return '<p class="muted"><em>(no figures available)</em></p>'
     cards = []
     for p in paths:
-        rel = _rel_href(p, rel_base)
+        img = _figure_img_html(p)
+        if not img:
+            continue
         cards.append(
             f'<div class="figure-card">'
-            f'<img src="{_esc(str(rel))}" alt="{_esc(p.stem)}" loading="lazy"/>'
+            f'{img}'
             f'<div class="caption">{_esc(p.stem)}</div>'
             f'</div>'
         )
+    if not cards:
+        return '<p class="muted"><em>(no figures available)</em></p>'
     return f'<div class="figure-grid">{"".join(cards)}</div>'
 
 
-
-def _focus_eda_figure(svg_path: Path, rel_base: Path) -> str:
+def _focus_eda_figure(svg_path: Path) -> str:
     """Single compact EDA plot for the Variable-of-interest section."""
     if not svg_path.exists():
         return '<p class="muted"><em>(figure not found)</em></p>'
-    rel = _rel_href(svg_path, rel_base)
+    img = _figure_img_html(svg_path)
+    if not img:
+        return '<p class="muted"><em>(figure not found)</em></p>'
     return (
         '<div class="focus-eda-figure">'
-        f'<img src="{_esc(str(rel))}" alt="{_esc(svg_path.stem)}" loading="lazy"/>'
+        f'{img}'
         f'<div class="caption">{_esc(svg_path.stem)}</div>'
         '</div>'
     )
@@ -972,8 +987,7 @@ def render_dda(cfg: ReportConfig, art: Artifacts) -> str:
 
     # Figures (collapsed by default; usually many)
     if art.dda_figures:
-        rel_base = (cfg.output_root / "report").resolve()
-        grid_html = svg_grid(art.dda_figures, rel_base)
+        grid_html = svg_grid(art.dda_figures)
         body.append(details_block(f"🖼️ DDA figures ({len(art.dda_figures)})",
                                   grid_html))
 
@@ -1029,9 +1043,8 @@ def render_missingness(cfg: ReportConfig, art: Artifacts) -> str:
         ))
 
     if art.missingness_figures:
-        rel_base = (cfg.output_root / "report").resolve()
         body.append("<h3>Patterns</h3>")
-        body.append(svg_grid(art.missingness_figures, rel_base))
+        body.append(svg_grid(art.missingness_figures))
 
     return f'<section class="report-section">{"".join(body)}</section>'
 
@@ -1128,10 +1141,9 @@ def render_eda(cfg: ReportConfig, art: Artifacts) -> str:
         # Figures for this target
         figs = [p for p in art.eda_figures if p.stem.startswith(f"{target}__")]
         if figs:
-            rel_base = (cfg.output_root / "report").resolve()
             body.append(details_block(
                 f"🖼️ EDA figures for {target} ({len(figs)})",
-                svg_grid(figs, rel_base)))
+                svg_grid(figs)))
 
     return f'<section class="report-section">{"".join(body)}</section>'
 
@@ -1166,8 +1178,7 @@ def render_inferential(cfg: ReportConfig, art: Artifacts) -> str:
                   if p.stem == f"{target}__forest"
                   or p.stem.startswith(f"{target}__forest")]
         if forest:
-            rel_base = (cfg.output_root / "report").resolve()
-            body.append(svg_grid(forest, rel_base))
+            body.append(svg_grid(forest))
 
         # VIF (collapsed)
         if target in art.inferential_vif:
@@ -1611,7 +1622,6 @@ def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
     if not col:
         return ""
 
-    rel_base = (cfg.output_root / "report").resolve()
     ref_level = (cfg.focus_reference_level or "").strip() or None
     hero_extra = ""
     if ref_level:
@@ -1663,13 +1673,14 @@ def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
     hero = by_year if by_year is not None else (dda_figs[0] if dda_figs else None)
     if hero is not None:
         body.append("<h4>Distribution figure</h4>")
-        rel = _rel_href(hero, rel_base)
-        body.append(
-            '<div class="focus-figure-hero figure-card">'
-            f'<img src="{_esc(str(rel))}" alt="{_esc(hero.stem)}"/>'
-            f'<div class="caption">{_esc(hero.stem)}</div>'
-            '</div>'
-        )
+        hero_img = _figure_img_html(hero)
+        if hero_img:
+            body.append(
+                '<div class="focus-figure-hero figure-card">'
+                f'{hero_img}'
+                f'<div class="caption">{_esc(hero.stem)}</div>'
+                '</div>'
+            )
         if by_year is not None:
             yr = (cfg.year_column or "year").strip()
             body.append(
@@ -1730,7 +1741,7 @@ def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
             (p for p in art.eda_figures if p.stem == f"{target}__{col}"), None)
         if eda_fig is not None:
             body.append("<p><strong>EDA figure</strong></p>")
-            body.append(_focus_eda_figure(eda_fig, rel_base))
+            body.append(_focus_eda_figure(eda_fig))
 
         if target in art.inferential_multivariable:
             tbl = art.inferential_multivariable[target].copy()
@@ -2001,7 +2012,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     out_path = args.out or (cfg.output_root / "report" / "report.html")
     html = build_report(cfg)
     written = write_html(html, out_path)
-    print(f"Report written: {written}")
+    print(f"Report written: {written} (self-contained; figures embedded inline)")
     return 0
 
 
