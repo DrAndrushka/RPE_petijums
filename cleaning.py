@@ -197,7 +197,15 @@ def apply_schema(
         if spec.kind == "binary":
             out[col] = _coerce_binary(s)
         elif spec.kind == "ordinal":
-            levels = spec.ordered_levels or sorted(s.dropna().unique().tolist())
+            if spec.ordered_levels is not None:
+                levels = spec.ordered_levels
+            elif isinstance(s.dtype, pd.CategoricalDtype) and s.dtype.ordered:
+                levels = list(s.cat.categories)
+            else:
+                raise ValueError(
+                    f"Column '{col}': ordinal kind requires spec.ordered_levels "
+                    f"or an ordered categorical dtype with declared order."
+                )
             out[col] = pd.Categorical(s, categories=levels, ordered=True)
         elif spec.kind == "nominal":
             out[col] = pd.Categorical(s, ordered=False)

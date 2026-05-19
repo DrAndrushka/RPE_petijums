@@ -40,6 +40,7 @@ import argparse
 import html as _html
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -379,6 +380,11 @@ details.collapsible > summary {
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _rel_href(path: Path, base_dir: Path) -> str:
+    """Path from ``base_dir`` (report.html parent) to ``path`` for portable ``src`` attrs."""
+    return os.path.relpath(path.resolve(), start=base_dir.resolve())
+
+
 def _esc(x: Any) -> str:
     """HTML-escape an arbitrary value (None / NaN -> empty string)."""
     if x is None:
@@ -611,11 +617,7 @@ def svg_grid(svg_paths: Iterable[Path], rel_base: Path,
         return '<p class="muted"><em>(no figures available)</em></p>'
     cards = []
     for p in paths:
-        try:
-            rel = p.relative_to(rel_base)
-        except ValueError:
-            # Fall back to absolute file:// URI if not under rel_base
-            rel = p.resolve()
+        rel = _rel_href(p, rel_base)
         cards.append(
             f'<div class="figure-card">'
             f'<img src="{_esc(str(rel))}" alt="{_esc(p.stem)}" loading="lazy"/>'
@@ -630,10 +632,7 @@ def _focus_eda_figure(svg_path: Path, rel_base: Path) -> str:
     """Single compact EDA plot for the Variable-of-interest section."""
     if not svg_path.exists():
         return '<p class="muted"><em>(figure not found)</em></p>'
-    try:
-        rel = svg_path.relative_to(rel_base)
-    except ValueError:
-        rel = svg_path.resolve()
+    rel = _rel_href(svg_path, rel_base)
     return (
         '<div class="focus-eda-figure">'
         f'<img src="{_esc(str(rel))}" alt="{_esc(svg_path.stem)}" loading="lazy"/>'
@@ -1664,10 +1663,7 @@ def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
     hero = by_year if by_year is not None else (dda_figs[0] if dda_figs else None)
     if hero is not None:
         body.append("<h4>Distribution figure</h4>")
-        try:
-            rel = hero.relative_to(rel_base)
-        except ValueError:
-            rel = hero.resolve()
+        rel = _rel_href(hero, rel_base)
         body.append(
             '<div class="focus-figure-hero figure-card">'
             f'<img src="{_esc(str(rel))}" alt="{_esc(hero.stem)}"/>'

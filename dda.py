@@ -510,10 +510,18 @@ def run_dda(
             _format_table_for_csv(tbl).to_csv(tabs_dir / f"dda_{name}.csv", index=False)  # display-only rounding
 
     # Overall dataset overview
+    analysed_tables = (
+        tables["continuous"],
+        tables["categorical"],
+        tables["binary"],
+        tables["datetime"],
+        tables["id_text"],
+    )
+    n_cols_analysed = sum(len(tbl) for tbl in analysed_tables)
     overall = pd.DataFrame([{
         "n_rows": len(df),
         "n_cols": df.shape[1],
-        "n_cols_analysed": sum(not t.empty for t in tables.values()),
+        "n_cols_analysed": n_cols_analysed,
         "missing_cells_pct": round(df.isna().mean().mean() * 100, 2),
     }])
     _format_table_for_csv(overall).to_csv(tabs_dir / "dda_overall.csv", index=False)

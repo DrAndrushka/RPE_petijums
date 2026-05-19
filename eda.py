@@ -107,18 +107,15 @@ def _cramers_v(table: np.ndarray) -> float:
 
 
 def _mwu_with_effect(x_group1: np.ndarray, x_group0: np.ndarray):
-    """Mann–Whitney U two-sided with rank-biserial effect size r = |Z|/√N."""
+    """Mann–Whitney U (two-sided) with signed rank-biserial r = 1 - 2U/(n1·n0)."""
     n1, n0 = len(x_group1), len(x_group0)
     if n1 < 2 or n0 < 2:
         return np.nan, np.nan, np.nan, n1 + n0
     res = mannwhitneyu(x_group1, x_group0, alternative="two-sided")
     U = float(res.statistic)
     p = float(res.pvalue)
-    # Convert U to Z (large-sample approximation, used for effect size only).
-    mu = n1 * n0 / 2
-    sigma = np.sqrt(n1 * n0 * (n1 + n0 + 1) / 12)
-    z = (U - mu) / sigma if sigma > 0 else np.nan
-    r = abs(z) / np.sqrt(n1 + n0) if sigma > 0 else np.nan
+    denom = n1 * n0
+    r = float(1.0 - (2.0 * U) / denom) if denom > 0 else np.nan
     return U, p, r, n1 + n0
 
 
@@ -271,10 +268,17 @@ def _association_test(
     # nominal target
     tcol = "target"
     if pk in ("continuous", "count", "datetime"):
-        groups = [
-            pair.loc[pair[tcol] == lv, pred].astype(float).values
-            for lv in sorted(pair[tcol].unique(), key=str)
-        ]
+        if pk == "datetime":
+            x_days = x_num.values.astype(float)
+            groups = [
+                x_days[pair[tcol].values == lv]
+                for lv in sorted(pair[tcol].unique(), key=str)
+            ]
+        else:
+            groups = [
+                pair.loc[pair[tcol] == lv, pred].astype(float).values
+                for lv in sorted(pair[tcol].unique(), key=str)
+            ]
         H, p, eps2 = _kruskal_with_effect(groups)
         return {"test": "kruskal_wallis", "stat": H, "p": p,
                 "effect": eps2, "effect_label": "epsilon_sq"}
@@ -340,14 +344,15 @@ def _plot_binary_target_rates(
     sub: pd.DataFrame,
     target: str,
     predictor: str,
-    pos_label: str,
+    positive_class,
     *,
     pred_levels: Sequence,
 ) -> None:
-    """P(target=1) by predictor level (binary target only)."""
+    """P(target = positive_class) by predictor level (binary target only)."""
     levels = list(pred_levels)
     n_lv = len(levels)
-    y_pos, _ = _encode_binary_target(sub[target], None)
+    y_pos, pos_used = _encode_binary_target(sub[target], positive_class)
+    pos_label = str(pos_used) if pos_used is not None else str(positive_class)
     props, lo, hi, ns = [], [], [], []
     for lv in levels:
         mask = sub[predictor] == lv
@@ -433,9 +438,8 @@ def _plot_pair(
     elif target_mode == "binary" and pred_kind in ("ordinal", "nominal", "binary"):
         fig.set_size_inches(_categorical_fig_width(
             sub[predictor].nunique()), 4)
-        pos_lbl = str(positive_class) if positive_class is not None else "1"
         _plot_binary_target_rates(
-            ax, sub, target, predictor, pos_lbl,
+            ax, sub, target, predictor, positive_class,
             pred_levels=_level_order(sub[predictor], pred_spec),
         )
 

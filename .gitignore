@@ -1,0 +1,17 @@
+output/
+outputs/
+**/output/
+**/outputs/
+
+*.tmp
+**/*.tmp
+
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+.DS_Store
+**/.DS_Store
+
+__pycache__/
+**/__pycache__/
+
+Icon*

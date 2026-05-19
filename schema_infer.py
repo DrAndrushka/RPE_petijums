@@ -93,7 +93,7 @@ def _looks_id(s: pd.Series, n_rows: int) -> bool:
     if nu < 0.95 * n_rows:
         return False
     name = (s.name or "").lower()
-    return bool(re.search(r"(^|_)(id|pk|uuid|guid|code|nr|num)(_|$)", name)) or nu == n_rows
+    return bool(re.search(r"(^|_)(id|pk|uuid|guid|code|nr|num)(_|$)", name))
 
 
 def _infer_one(s: pd.Series, n_rows: int, ordinal_max_levels: int) -> Kind:

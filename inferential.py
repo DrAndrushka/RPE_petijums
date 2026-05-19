@@ -71,6 +71,13 @@ def _format_inferential_table(df: pd.DataFrame) -> pd.DataFrame:
     return _format_table_for_csv(out)
 
 
+def _safe_z_denominator(sd: float) -> float:
+    """Return sd when finite and positive; otherwise 1.0 (no scaling)."""
+    if pd.isna(sd) or not np.isfinite(sd) or sd == 0:
+        return 1.0
+    return float(sd)
+
+
 def _ensure_dirs(root: Path) -> tuple[Path, Path]:
     figs = root / "inferential" / "figures"
     tabs = root / "inferential" / "tables"
@@ -103,7 +110,7 @@ def _build_design(
         s = df[p]
         if spec.kind in ("continuous", "count"):
             mu, sd = s.mean(), s.std(ddof=0)
-            z = (s - mu) / (sd if sd not in (0, np.nan) else 1.0)
+            z = (s - mu) / _safe_z_denominator(sd)
             z.name = p
             pieces.append(z)
             mapping[p] = [p]
@@ -221,7 +228,12 @@ def _encode_target(y: pd.Series, positive_class) -> tuple[pd.Series, object]:
         if len(nn) != 2:
             raise ValueError(f"Target '{y.name}' not binary; values={nn}")
         positive_class = True if True in nn else 1 if 1 in nn else sorted(nn, key=str)[-1]
-    return (y == positive_class).astype(float), positive_class
+    out = pd.Series(
+        np.where(y.isna(), np.nan, (y == positive_class).astype(float)),
+        index=y.index,
+        dtype=float,
+    )
+    return out, positive_class
 
 
 def fit_multivariable_logistic(
@@ -251,7 +263,7 @@ def fit_multivariable_logistic(
 
     for frame in imputed_frames:
         X, _ = _build_design(frame, schema, predictors)
-        X = X[keep_cols].copy()
+        X = X.reindex(columns=keep_cols, fill_value=0.0)
         y_enc, _ = _encode_target(frame[target], positive_class)
         sub = pd.concat([y_enc.rename("_y"), X], axis=1).dropna()
         if len(sub) < max(20, X.shape[1] + 5):
