@@ -3,19 +3,21 @@ eda.py
 =======
 Univariate target × predictor association screening.
 
-Statistical rules (kind-pair → test)
-------------------------------------
-target kind = binary or ordinal-with-2-levels (we always encode the positive
-class as 1, negative as 0 before testing).
+Target kinds (from schema, or inferred from data)
+-------------------------------------------------
+- **binary**     : 2 levels → encode 0/1, then screening below
+- **continuous** : numeric outcome
+- **ordinal**    : ordered categories (≥2 levels)
+- **nominal**    : unordered categories (≥2 levels)
 
-predictor kind | test                            | effect size
--------------- | -------------------------------- | -----------
-continuous     | Mann–Whitney U (two-sided)       | r = |Z| / √N (rank-biserial)
-count          | Mann–Whitney U                   | r = |Z| / √N
-ordinal        | Spearman ρ (rank correlation)    | ρ
-nominal        | χ² (or Fisher exact if 2×2 and any expected < 5) | Cramér's V
-binary         | Fisher exact (2×2)               | odds ratio + Cramér's V
-datetime       | converted to days-since-min → Mann–Whitney      | r = |Z| / √N
+Tests (target kind × predictor kind)
+------------------------------------
+| target \\ predictor | continuous / count | ordinal | nominal / binary | datetime |
+|--------------------|--------------------|---------|------------------|----------|
+| binary             | Mann–Whitney U     | Spearman ρ | χ² / Fisher   | MWU days |
+| continuous         | Spearman ρ         | Spearman ρ | Kruskal–Wallis | Spearman |
+| ordinal            | Spearman ρ         | Spearman ρ | χ²            | Spearman |
+| nominal            | Kruskal–Wallis    | χ²      | χ²            | Kruskal  |
 
 All p-values per target are corrected with Benjamini–Hochberg (FDR).
 
@@ -37,7 +39,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy.stats import (
-    mannwhitneyu, spearmanr, chi2_contingency, fisher_exact, norm,
+    mannwhitneyu, spearmanr, chi2_contingency, fisher_exact, kruskal,
 )
 from statsmodels.stats.proportion import proportion_confint
 
@@ -120,6 +122,166 @@ def _mwu_with_effect(x_group1: np.ndarray, x_group0: np.ndarray):
     return U, p, r, n1 + n0
 
 
+def _infer_target_kind(y: pd.Series, spec: ColSpec | None) -> str:
+    """Return binary | continuous | ordinal | nominal | skip."""
+    nn = y.dropna()
+    if len(nn) == 0 or nn.nunique() < 2:
+        return "skip"
+    kind = spec.kind if spec is not None else None
+    n_u = int(nn.nunique())
+    if kind == "binary" or (kind is None and n_u == 2):
+        return "binary"
+    if kind in ("continuous", "count"):
+        return "continuous"
+    if kind == "ordinal":
+        return "binary" if n_u == 2 else "ordinal"
+    if kind == "nominal":
+        return "binary" if n_u == 2 else "nominal"
+    if pd.api.types.is_numeric_dtype(nn):
+        return "continuous" if n_u > 15 else ("binary" if n_u == 2 else "ordinal")
+    return "binary" if n_u == 2 else "nominal"
+
+
+def _prepare_target(
+    y_raw: pd.Series,
+    target_mode: str,
+    spec: ColSpec | None,
+    positive_class,
+) -> tuple[pd.Series, object | None]:
+    if target_mode == "binary":
+        return _encode_binary_target(y_raw, positive_class)
+    if target_mode == "continuous":
+        return pd.to_numeric(y_raw, errors="coerce"), None
+    if target_mode == "ordinal":
+        if spec and spec.ordered_levels:
+            cat = pd.Categorical(y_raw, categories=spec.ordered_levels, ordered=True)
+        else:
+            cat = pd.Categorical(y_raw, ordered=True)
+        codes = pd.Series(cat.codes.astype(float), index=y_raw.index).replace(-1, np.nan)
+        return codes, None
+    # nominal — string labels for tables / plots
+    return y_raw.astype(str), None
+
+
+def _predictor_values(pair: pd.DataFrame, pred: str, pred_spec: ColSpec) -> tuple[pd.Series, str]:
+    """Numeric x for correlation tests; kind label for branching."""
+    kind = pred_spec.kind
+    if kind in ("continuous", "count"):
+        return pair[pred].astype(float), kind
+    if kind == "ordinal":
+        cats = pd.Categorical(
+            pair[pred],
+            categories=pred_spec.ordered_levels if pred_spec.ordered_levels else None,
+            ordered=True,
+        )
+        return pd.Series(cats.codes.astype(float), index=pair.index).replace(-1, np.nan), kind
+    if kind == "datetime":
+        t = pd.to_datetime(pair[pred], errors="coerce")
+        days = (t - t.min()).dt.days.astype(float)
+        return days, "datetime"
+    return pair[pred], kind
+
+
+def _kruskal_with_effect(groups: list[np.ndarray]) -> tuple[float, float, float]:
+    valid = [np.asarray(g, dtype=float) for g in groups if len(g) > 0]
+    if len(valid) < 2:
+        return np.nan, np.nan, np.nan
+    H, p = kruskal(*valid)
+    n = sum(len(g) for g in valid)
+    eps2 = float((H - len(valid) + 1) / (n - 1)) if n > 1 else np.nan
+    return float(H), float(p), eps2
+
+
+def _chi2_row(table: np.ndarray) -> dict:
+    if table.size == 0 or table.sum() == 0:
+        return {"test": "chi2", "stat": np.nan, "p": np.nan,
+                "effect": np.nan, "effect_label": "cramers_v"}
+    if table.shape == (2, 2):
+        exp = chi2_contingency(table, correction=False)[3]
+        if (exp < 5).any():
+            odds, p = fisher_exact(table, alternative="two-sided")
+            return {"test": "fisher_exact", "stat": float(odds), "p": float(p),
+                    "effect": _cramers_v(table), "effect_label": "cramers_v"}
+    chi2, p, _, _ = chi2_contingency(table, correction=False)
+    return {"test": "chi2", "stat": float(chi2), "p": float(p),
+            "effect": _cramers_v(table), "effect_label": "cramers_v"}
+
+
+def _spearman_row(y: np.ndarray, x: np.ndarray) -> dict:
+    if np.nanstd(y) == 0 or np.nanstd(x) == 0:
+        return {"test": "spearman", "stat": np.nan, "p": np.nan,
+                "effect": np.nan, "effect_label": "spearman_rho"}
+    rho, p = spearmanr(y, x, nan_policy="omit")
+    return {"test": "spearman", "stat": float(rho), "p": float(p),
+            "effect": float(rho), "effect_label": "spearman_rho"}
+
+
+def _association_test(
+    target_mode: str,
+    pair: pd.DataFrame,
+    target: str,
+    pred: str,
+    pred_spec: ColSpec,
+) -> dict:
+    """One screening test for a clean (target, predictor) pair."""
+    y_col = "_y"
+    pred_kind = pred_spec.kind
+
+    if target_mode == "binary":
+        y_arr = pair[y_col].values.astype(float)
+        if pred_kind in ("continuous", "count"):
+            x = pair[pred].astype(float).values
+            stat, p, eff, _ = _mwu_with_effect(x[y_arr == 1], x[y_arr == 0])
+            return {"test": "mann_whitney_u", "stat": stat, "p": p,
+                    "effect": eff, "effect_label": "rank_biserial_r"}
+        if pred_kind == "ordinal":
+            x, _ = _predictor_values(pair, pred, pred_spec)
+            return _spearman_row(y_arr, x.values)
+        if pred_kind == "datetime":
+            x, _ = _predictor_values(pair, pred, pred_spec)
+            stat, p, eff, _ = _mwu_with_effect(
+                x.values[y_arr == 1], x.values[y_arr == 0])
+            return {"test": "mann_whitney_u_days", "stat": stat, "p": p,
+                    "effect": eff, "effect_label": "rank_biserial_r"}
+        if pred_kind in ("nominal", "binary"):
+            ct = pd.crosstab(pair[pred], pair[y_col])
+            return _chi2_row(ct.values)
+
+    y_num = pair[y_col]
+    x_num, pk = _predictor_values(pair, pred, pred_spec)
+
+    if target_mode == "continuous":
+        yv = y_num.values.astype(float)
+        if pk in ("continuous", "count", "ordinal", "datetime"):
+            return _spearman_row(yv, x_num.values.astype(float))
+        # nominal / binary predictor
+        # group order does not affect Kruskal–Wallis p-value
+        groups = [yv[pair[pred] == lv].astype(float) for lv in pair[pred].unique()]
+        H, p, eps2 = _kruskal_with_effect(groups)
+        return {"test": "kruskal_wallis", "stat": H, "p": p,
+                "effect": eps2, "effect_label": "epsilon_sq"}
+
+    if target_mode == "ordinal":
+        yv = y_num.values.astype(float)
+        if pk in ("continuous", "count", "ordinal", "datetime"):
+            return _spearman_row(yv, x_num.values.astype(float))
+        ct = pd.crosstab(pair[pred], pair["target"])
+        return _chi2_row(ct.values)
+
+    # nominal target
+    tcol = "target"
+    if pk in ("continuous", "count", "datetime"):
+        groups = [
+            pair.loc[pair[tcol] == lv, pred].astype(float).values
+            for lv in sorted(pair[tcol].unique(), key=str)
+        ]
+        H, p, eps2 = _kruskal_with_effect(groups)
+        return {"test": "kruskal_wallis", "stat": H, "p": p,
+                "effect": eps2, "effect_label": "epsilon_sq"}
+    ct = pd.crosstab(pair[pred], pair[tcol])
+    return _chi2_row(ct.values)
+
+
 # ---------------------------------------------------------------------------
 # Per-pair plotting
 # ---------------------------------------------------------------------------
@@ -133,6 +295,22 @@ def _polish_ax(ax: plt.Axes) -> None:
 
 def _categorical_fig_width(n_levels: int) -> float:
     return max(3.2, min(6.0, 1.4 * n_levels + 1.2))
+
+
+def _level_order(s: pd.Series, spec: ColSpec | None) -> list:
+    """Observed levels in schema / categorical order (not alphabetical)."""
+    if not isinstance(s, pd.Series):
+        s = pd.Series(s)
+    obs = set(s.dropna())
+    if not obs:
+        return []
+    if isinstance(s.dtype, pd.CategoricalDtype):
+        return [c for c in s.cat.categories if c in obs]
+    if spec and spec.ordered_levels:
+        ordered = [lv for lv in spec.ordered_levels if lv in obs]
+        extras = sorted((x for x in obs if x not in spec.ordered_levels), key=str)
+        return ordered + extras
+    return sorted(obs, key=str)
 
 
 def _errorbar_yerr(props, lo, hi) -> np.ndarray:
@@ -157,137 +335,159 @@ def _annotate_above(
         )
 
 
+def _plot_binary_target_rates(
+    ax: plt.Axes,
+    sub: pd.DataFrame,
+    target: str,
+    predictor: str,
+    pos_label: str,
+    *,
+    pred_levels: Sequence,
+) -> None:
+    """P(target=1) by predictor level (binary target only)."""
+    levels = list(pred_levels)
+    n_lv = len(levels)
+    y_pos, _ = _encode_binary_target(sub[target], None)
+    props, lo, hi, ns = [], [], [], []
+    for lv in levels:
+        mask = sub[predictor] == lv
+        n = int(mask.sum())
+        k = int(y_pos.loc[mask].sum())
+        ns.append(n)
+        ci_lo, ci_hi = proportion_confint(k, n, alpha=0.05, method="wilson")
+        props.append(k / n if n else 0.0)
+        lo.append(ci_lo)
+        hi.append(ci_hi)
+    x = np.arange(n_lv)
+    props_a = np.clip(np.asarray(props, dtype=float), 0.0, 1.0)
+    lo_a, hi_a = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+    ax.errorbar(
+        x, props_a, yerr=_errorbar_yerr(props_a, lo_a, hi_a),
+        fmt="o", color="#3b7ddd", markersize=8, capsize=3,
+        linewidth=1.4, elinewidth=1.1,
+        markeredgecolor="white", markeredgewidth=1.2, zorder=3,
+    )
+    pad = 0.35 if n_lv <= 4 else 0.5
+    ax.set_xlim(-pad, n_lv - 1 + pad)
+    ymax = min(1.0, float(np.nanmax(hi_a)) + 0.14)
+    ax.set_ylim(0, max(0.35, ymax))
+    _annotate_above(ax, x, hi_a, [f"{p:.0%}\n(n={n})" for p, n in zip(props_a, ns)])
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [str(lv) for lv in levels],
+        rotation=30 if n_lv > 4 else 0,
+        ha="center" if n_lv <= 4 else "right",
+    )
+    ax.set_xlabel(predictor)
+    ax.set_ylabel(f"P({target}={pos_label})")
+    ax.set_title(f"{predictor} → P({target})")
+
+
 def _plot_pair(
-    df: pd.DataFrame, target: str, predictor: str,
-    pred_kind: str, figs_dir: Path,
+    df: pd.DataFrame,
+    target: str,
+    predictor: str,
+    *,
+    target_mode: str,
+    pred_kind: str,
+    target_spec: ColSpec | None,
+    pred_spec: ColSpec | None,
+    positive_class,
+    figs_dir: Path,
 ) -> None:
     safe = f"{target}__{predictor}"
     sub = df[[target, predictor]].dropna()
     if sub.empty:
         return
 
-    if pred_kind in ("continuous", "count"):
-        groups = sorted(sub[target].dropna().unique(), key=str)
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    # Continuous / count predictor → distribution of predictor by target groups
+    if pred_kind in ("continuous", "count", "datetime"):
+        if pred_kind == "datetime":
+            t = pd.to_datetime(sub[predictor], errors="coerce")
+            sub = sub.assign(_x=(t - t.min()).dt.days.astype(float))
+            xcol = "_x"
+            xlabel = f"{predictor} (days since min)"
+        else:
+            sub = sub.assign(_x=sub[predictor].astype(float))
+            xcol = "_x"
+            xlabel = predictor
+        groups = _level_order(sub[target], target_spec)
         n_g = len(groups)
-        fig, ax = plt.subplots(figsize=(_categorical_fig_width(n_g), 4))
+        fig.set_size_inches(_categorical_fig_width(n_g), 4)
         sns.boxplot(
-            x=target, y=predictor, data=sub, order=groups, hue=target,
+            x=target, y=xcol, data=sub, order=groups, hue=target,
             ax=ax, palette="Set2", legend=False,
             width=0.55, linewidth=1.2, fliersize=3,
         )
         sns.stripplot(
-            x=target, y=predictor, data=sub, order=groups, ax=ax,
+            x=target, y=xcol, data=sub, order=groups, ax=ax,
             color="#333333", size=2.5, alpha=0.35, jitter=0.22,
         )
-        labels, tops = [], []
-        for i, g in enumerate(groups):
-            vals = sub.loc[sub[target] == g, predictor].astype(float)
-            n = len(vals)
-            med = float(vals.median()) if n else np.nan
-            tops.append(float(vals.quantile(0.75)) if n else np.nan)
-            labels.append(f"n={n}\nmed={med:.3g}" if n else "n=0")
-        _annotate_above(ax, np.arange(n_g), np.asarray(tops), labels)
-        y_hi = float(sub[predictor].max())
-        if np.isfinite(y_hi):
-            pad = (y_hi - float(sub[predictor].min())) * 0.12 or abs(y_hi) * 0.08 or 0.5
-            ax.set_ylim(top=y_hi + pad)
+        _polish_ax(ax)
+        ax.set_xlabel(target)
+        ax.set_ylabel(xlabel)
+        ax.set_title(f"{xlabel} by {target}")
+
+    elif target_mode == "binary" and pred_kind in ("ordinal", "nominal", "binary"):
+        fig.set_size_inches(_categorical_fig_width(
+            sub[predictor].nunique()), 4)
+        pos_lbl = str(positive_class) if positive_class is not None else "1"
+        _plot_binary_target_rates(
+            ax, sub, target, predictor, pos_lbl,
+            pred_levels=_level_order(sub[predictor], pred_spec),
+        )
+
+    elif target_mode == "continuous" and pred_kind in ("ordinal", "nominal", "binary"):
+        groups = _level_order(sub[predictor], pred_spec)
+        fig.set_size_inches(_categorical_fig_width(len(groups)), 4)
+        sns.boxplot(
+            x=predictor, y=target, data=sub, order=groups, hue=predictor,
+            ax=ax, palette="Set2", legend=False,
+            width=0.55, linewidth=1.2, fliersize=3,
+        )
+        _polish_ax(ax)
+        ax.set_xlabel(predictor)
+        ax.set_ylabel(target)
+        ax.set_title(f"{target} by {predictor}")
+
+    elif target_mode in ("ordinal", "nominal") and pred_kind in (
+        "ordinal", "nominal", "binary",
+    ):
+        pred_order = _level_order(sub[predictor], pred_spec)
+        target_order = _level_order(sub[target], target_spec)
+        ct = pd.crosstab(sub[predictor], sub[target], normalize="index")
+        ct = ct.reindex(index=pred_order, columns=target_order, fill_value=0.0)
+        fig.set_size_inches(max(5, 0.9 * ct.shape[1] + 2), max(3.5, 0.5 * ct.shape[0] + 2))
+        sns.heatmap(ct, annot=True, fmt=".0%", cmap="Blues", ax=ax, vmin=0, vmax=1)
+        ax.set_xlabel(target)
+        ax.set_ylabel(predictor)
+        ax.set_title(f"{target} share within {predictor}")
+
+    elif target_mode == "continuous" and pred_kind in ("continuous", "count"):
+        sub = sub.assign(_x=sub[predictor].astype(float), _y=sub[target].astype(float))
+        sns.regplot(data=sub, x="_x", y="_y", ax=ax,
+                    scatter_kws={"alpha": 0.25, "s": 12}, line_kws={"color": "#e76f51"})
+        _polish_ax(ax)
+        ax.set_xlabel(predictor)
+        ax.set_ylabel(target)
+        ax.set_title(f"{target} vs {predictor}")
+
+    elif target_mode in ("ordinal", "nominal") and pred_kind in ("continuous", "count"):
+        groups = _level_order(sub[target], target_spec)
+        fig.set_size_inches(_categorical_fig_width(len(groups)), 4)
+        sns.boxplot(
+            x=target, y=predictor, data=sub, order=groups, hue=target,
+            ax=ax, palette="Set2", legend=False,
+        )
         _polish_ax(ax)
         ax.set_xlabel(target)
         ax.set_ylabel(predictor)
         ax.set_title(f"{predictor} by {target}")
-    elif pred_kind == "ordinal":
-        all_levels = (list(sub[predictor].cat.categories)
-                      if isinstance(sub[predictor].dtype, pd.CategoricalDtype)
-                      else sorted(sub[predictor].dropna().unique()))
-        levels = [lv for lv in all_levels if (sub[predictor] == lv).any()]
-        n_lv = len(levels)
-        fig, ax = plt.subplots(figsize=(_categorical_fig_width(n_lv), 4))
-        y_pos, _ = _encode_binary_target(sub[target], None)
-        props, lo, hi, ns = [], [], [], []
-        for lv in levels:
-            mask = sub[predictor] == lv
-            n = int(mask.sum())
-            k = int(y_pos.loc[mask].sum())
-            ns.append(n)
-            p = k / n
-            ci_lo, ci_hi = proportion_confint(k, n, alpha=0.05, method="wilson")
-            props.append(p)
-            lo.append(ci_lo)
-            hi.append(ci_hi)
-        x = np.arange(n_lv)
-        props_a = np.clip(np.asarray(props, dtype=float), 0.0, 1.0)
-        lo_a, hi_a = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
-        ax.errorbar(
-            x, props_a, yerr=_errorbar_yerr(props_a, lo_a, hi_a),
-            fmt="o-", color="#3b7ddd", markersize=8, capsize=3,
-            linewidth=1.4, elinewidth=1.1,
-            markeredgecolor="white", markeredgewidth=1.2, zorder=3,
-        )
-        pad = 0.35 if n_lv <= 4 else 0.5
-        ax.set_xlim(-pad, n_lv - 1 + pad)
-        ymax = min(1.0, float(np.nanmax(hi_a)) + 0.14)
-        ax.set_ylim(0, max(0.35, ymax))
-        _annotate_above(
-            ax, x, hi_a,
-            [f"{p:.0%}\n(n={n})" for p, n in zip(props_a, ns)],
-        )
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            [str(lv) for lv in levels],
-            rotation=30 if n_lv > 4 else 0,
-            ha="center" if n_lv <= 4 else "right",
-        )
-        _polish_ax(ax)
-        ax.set_xlabel(predictor)
-        ax.set_ylabel(f"P({target}=1)")
-        ax.set_title(f"{predictor} → P({target})")
-    elif pred_kind in ("nominal", "binary"):
-        all_levels = (list(sub[predictor].cat.categories)
-                      if isinstance(sub[predictor].dtype, pd.CategoricalDtype)
-                      else sorted(sub[predictor].dropna().unique(), key=str))
-        levels = [lv for lv in all_levels if (sub[predictor] == lv).any()]
-        n_lv = len(levels)
-        fig, ax = plt.subplots(figsize=(_categorical_fig_width(n_lv), 4))
-        y_pos, _ = _encode_binary_target(sub[target], None)
-        props, lo, hi, ns = [], [], [], []
-        for lv in levels:
-            mask = sub[predictor] == lv
-            n = int(mask.sum())
-            k = int(y_pos.loc[mask].sum())
-            ns.append(n)
-            p = k / n
-            ci_lo, ci_hi = proportion_confint(k, n, alpha=0.05, method="wilson")
-            props.append(p)
-            lo.append(ci_lo)
-            hi.append(ci_hi)
-        x = np.arange(n_lv)
-        props_a = np.clip(np.asarray(props, dtype=float), 0.0, 1.0)
-        lo_a, hi_a = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
-        ax.errorbar(
-            x, props_a, yerr=_errorbar_yerr(props_a, lo_a, hi_a),
-            fmt="o", color="#3b7ddd", markersize=8, capsize=3,
-            linewidth=1.4, elinewidth=1.1,
-            markeredgecolor="white", markeredgewidth=1.2, zorder=3,
-        )
-        pad = 0.35 if n_lv <= 4 else 0.5
-        ax.set_xlim(-pad, n_lv - 1 + pad)
-        ymax = min(1.0, float(np.nanmax(hi_a)) + 0.14)
-        ax.set_ylim(0, max(0.35, ymax))
-        _annotate_above(
-            ax, x, hi_a,
-            [f"{p:.0%}\n(n={n})" for p, n in zip(props_a, ns)],
-        )
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            [str(lv) for lv in levels],
-            rotation=30 if n_lv > 4 else 0,
-            ha="center" if n_lv <= 4 else "right",
-        )
-        _polish_ax(ax)
-        ax.set_xlabel(predictor)
-        ax.set_ylabel(f"P({target}=1)")
-        ax.set_title(f"{predictor} → P({target})")
+
     else:
+        plt.close(fig)
         return
 
     fig.tight_layout()
@@ -316,10 +516,10 @@ def screen_associations(
     ----------
     df            : the analysis-ready dataframe (after cleaning).
     schema        : the ColSpec schema (drives test selection).
-    targets       : binary target column names.
+    targets       : outcome column names (binary, continuous, ordinal, or nominal).
     predictors    : optional whitelist; if None, every kept non-target column
                     with a testable kind is used.
-    positive_class: {target: value_that_is_positive} (default: True/1/last).
+    positive_class: for **binary** targets only — {target: value_that_is_positive}.
     fdr_alpha     : threshold for the fdr_significant flag.
 
     Returns
@@ -340,84 +540,62 @@ def screen_associations(
     for target in targets:
         if target not in df.columns:
             continue
-        y_enc, pos_used = _encode_binary_target(df[target], positive_class.get(target))
+        target_spec = schema.get(target)
+        target_mode = _infer_target_kind(df[target], target_spec)
+        if target_mode == "skip":
+            warnings.warn(f"EDA skipped target '{target}': fewer than 2 non-missing levels.",
+                          stacklevel=2)
+            continue
+        pos_cfg = positive_class.get(target)
+        if target_mode != "binary" and pos_cfg is not None:
+            warnings.warn(
+                f"positive_class for '{target}' ignored (target kind={target_mode}).",
+                stacklevel=2,
+            )
+        y_enc, pos_used = _prepare_target(
+            df[target], target_mode, target_spec, pos_cfg)
 
         for pred in predictors:
             if pred not in df.columns or pred == target:
                 continue
-            spec = schema[pred]
-            pair = pd.concat([y_enc.rename("_y"), df[pred].rename(pred)], axis=1).dropna()
+            pred_spec = schema.get(pred)
+            if pred_spec is None:
+                continue
+            spec = pred_spec
+            pair = pd.concat([
+                df[target].rename("target"),
+                y_enc.rename("_y"),
+                df[pred].rename(pred),
+            ], axis=1).dropna()
             n_used = len(pair)
             if n_used < 5:
-                rows.append({"target": target, "predictor": pred, "kind": spec.kind,
-                             "test": "skip", "stat": np.nan, "p": np.nan,
-                             "effect": np.nan, "effect_label": "",
-                             "n_used": n_used, "positive_class": pos_used})
+                rows.append({
+                    "target": target, "target_kind": target_mode,
+                    "predictor": pred, "kind": spec.kind,
+                    "test": "skip", "stat": np.nan, "p": np.nan,
+                    "effect": np.nan, "effect_label": "",
+                    "n_used": n_used, "positive_class": pos_used,
+                })
                 continue
 
-            y_arr = pair["_y"].values
-
-            if spec.kind in ("continuous", "count"):
-                x = pair[pred].astype(float).values
-                stat, p, eff, n = _mwu_with_effect(x[y_arr == 1], x[y_arr == 0])
-                row = {"test": "mann_whitney_u", "stat": stat, "p": p,
-                       "effect": eff, "effect_label": "rank_biserial_r"}
-
-            elif spec.kind == "ordinal":
-                # Spearman on numeric codes
-                codes = pd.Categorical(pair[pred],
-                                       categories=spec.ordered_levels
-                                       if spec.ordered_levels else None,
-                                       ordered=True).codes.astype(float)
-                # Guard against constant input (zero variance) — happens when a
-                # predictor/target has only one observed level after NA drop.
-                # Spearman is undefined; scipy raises ConstantInputWarning and
-                # returns NaN. We skip and record n/a explicitly.
-                if np.nanstd(codes) == 0 or np.nanstd(y_arr) == 0:
-                    row = {"test": "spearman", "stat": np.nan, "p": np.nan,
-                           "effect": np.nan, "effect_label": "spearman_rho"}
-                else:
-                    rho, p = spearmanr(codes, y_arr)
-                    row = {"test": "spearman", "stat": float(rho), "p": float(p),
-                           "effect": float(rho), "effect_label": "spearman_rho"}
-
-            elif spec.kind == "datetime":
-                t = pd.to_datetime(pair[pred], errors="coerce")
-                days = (t - t.min()).dt.days.astype(float).values
-                stat, p, eff, n = _mwu_with_effect(days[y_arr == 1], days[y_arr == 0])
-                row = {"test": "mann_whitney_u_days", "stat": stat, "p": p,
-                       "effect": eff, "effect_label": "rank_biserial_r"}
-
-            elif spec.kind in ("nominal", "binary"):
-                ct = pd.crosstab(pair[pred], pair["_y"])
-                table = ct.values
-                if table.shape == (2, 2):
-                    # Use Fisher when small expected counts; report OR
-                    exp = chi2_contingency(table, correction=False)[3]
-                    if (exp < 5).any():
-                        odds, p = fisher_exact(table, alternative="two-sided")
-                        v = _cramers_v(table)
-                        row = {"test": "fisher_exact", "stat": float(odds), "p": float(p),
-                               "effect": v, "effect_label": "cramers_v"}
-                    else:
-                        chi2, p, _, _ = chi2_contingency(table, correction=False)
-                        v = _cramers_v(table)
-                        row = {"test": "chi2", "stat": float(chi2), "p": float(p),
-                               "effect": v, "effect_label": "cramers_v"}
-                else:
-                    chi2, p, _, _ = chi2_contingency(table, correction=False)
-                    v = _cramers_v(table)
-                    row = {"test": "chi2", "stat": float(chi2), "p": float(p),
-                           "effect": v, "effect_label": "cramers_v"}
-            else:
-                continue
-
-            row.update({"target": target, "predictor": pred, "kind": spec.kind,
-                        "n_used": n_used, "positive_class": pos_used})
+            row = _association_test(target_mode, pair, target, pred, spec)
+            row.update({
+                "target": target, "target_kind": target_mode,
+                "predictor": pred, "kind": spec.kind,
+                "n_used": n_used, "positive_class": pos_used,
+            })
             rows.append(row)
 
             try:
-                _plot_pair(df, target, pred, spec.kind, figs_dir)
+                _plot_pair(
+                    df, target, pred,
+                    target_mode=target_mode,
+                    pred_kind=spec.kind,
+                    target_spec=target_spec,
+                    pred_spec=pred_spec,
+                    positive_class=pos_used,
+                    figs_dir=figs_dir,
+                )
             except Exception as exc:
                 warnings.warn(
                     f"EDA plot skipped for {target} × {pred}: {exc}",
@@ -427,7 +605,7 @@ def screen_associations(
     out = pd.DataFrame(rows)
     if out.empty:
         out = pd.DataFrame(columns=[
-            "target", "predictor", "kind", "test", "stat", "p", "p_fdr",
+            "target", "target_kind", "predictor", "kind", "test", "stat", "p", "p_fdr",
             "fdr_significant", "effect", "effect_label", "n_used", "positive_class",
         ])
         _format_table_for_csv(out).to_csv(tabs_dir / "associations.csv", index=False)
@@ -440,7 +618,7 @@ def screen_associations(
         out.loc[mask, "p_fdr"] = benjamini_hochberg(out.loc[mask, "p"]).values
     out["fdr_significant"] = out["p_fdr"] < fdr_alpha
 
-    cols = ["target", "predictor", "kind", "test", "stat", "p", "p_fdr",
+    cols = ["target", "target_kind", "predictor", "kind", "test", "stat", "p", "p_fdr",
             "fdr_significant", "effect", "effect_label",
             "n_used", "positive_class"]
     out["_eff_abs"] = out["effect"].abs()

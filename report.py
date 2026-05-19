@@ -93,6 +93,8 @@ class ReportConfig:
     focus_predictor: str | None = None
     # For one-hot nominal focus vars: which level is reference (e.g. transperineāla).
     focus_reference_level: str | None = None
+    # Column used for multi-year focus figure (``<col>__bar_by_year.svg``).
+    year_column: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +331,7 @@ details.collapsible > summary {
 .focus-section ul { font-size: 11.5px; padding-left: 18px; }
 .focus-section ul li { margin: 2px 0; }
 .focus-route-note { font-size: 12px; color: #374151; margin: 6px 0 0; }
+.figure-note { font-size: 11px; color: #4b5563; margin: 8px 0 0; max-width: 52rem; }
 .focus-route-card {
     margin: 8px 0 12px;
     padding: 10px 12px;
@@ -1043,7 +1046,8 @@ def render_eda(cfg: ReportConfig, art: Artifacts) -> str:
 
     body.append(
         '<p>Each predictor was screened against each target using a '
-        'statistical test chosen from the schema-defined variable type. '
+        'test matched to both outcome and predictor types (binary, continuous, '
+        'ordinal, or nominal). '
         'p-values are corrected per target using Benjamini–Hochberg FDR.</p>'
     )
 
@@ -1354,6 +1358,12 @@ def render_stats_decoder() -> str:
         ("Cramér's V",
          "Strength of association between categorical variables. 0 = none, "
          "1 = perfect association."),
+        ("Kruskal–Wallis",
+         "Whether a numeric predictor differs across multiple outcome "
+         "groups (non-parametric alternative to one-way ANOVA)."),
+        ("ε² (epsilon-squared)",
+         "Effect size for Kruskal–Wallis; proportion of variance explained "
+         "by group membership."),
         ("Odds ratio (OR)",
          "How many times higher or lower the odds of the outcome are. "
          "OR = 1: no difference. OR > 1: higher odds. OR < 1: lower odds."),
@@ -1650,9 +1660,10 @@ def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
     # (stem == col or col__*, e.g. biopsy_type__bar.svg from dda.py). Display
     # size is .focus-section .focus-figure-hero in _CSS above.
     dda_figs = _figures_for_column(art.dda_figures, col)
-    if dda_figs:
+    by_year = next((p for p in dda_figs if p.stem == f"{col}__bar_by_year"), None)
+    hero = by_year if by_year is not None else (dda_figs[0] if dda_figs else None)
+    if hero is not None:
         body.append("<h4>Distribution figure</h4>")
-        hero = dda_figs[0]  # sorted(); usually the __bar chart for categoricals
         try:
             rel = hero.relative_to(rel_base)
         except ValueError:
@@ -1663,6 +1674,14 @@ def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
             f'<div class="caption">{_esc(hero.stem)}</div>'
             '</div>'
         )
+        if by_year is not None:
+            yr = (cfg.year_column or "year").strip()
+            body.append(
+                '<p class="figure-note">Top: cohort-wide counts. Bottom: category shares '
+                f"within each {yr} (row-normalised). Descriptive only — not adjusted for "
+                "confounding. Optional χ² p-value tests marginal association with calendar "
+                f"year when expected counts ≥ 5.</p>"
+            )
 
     if art.missingness_summary is not None and not art.missingness_summary.empty:
         ms = art.missingness_summary

@@ -233,11 +233,26 @@ def _plot_continuous(s: pd.Series, name: str, out_dir: Path) -> list[Path]:
     return paths
 
 
-def _plot_ordinal(s: pd.Series, name: str, out_dir: Path) -> list[Path]:
+def _ordinal_bar_order(s: pd.Series, ordered_levels: list | None) -> list:
+    obs = set(s.dropna())
+    if not obs:
+        return []
+    if isinstance(s.dtype, pd.CategoricalDtype):
+        return [c for c in s.cat.categories if c in obs]
+    if ordered_levels:
+        head = [lv for lv in ordered_levels if lv in obs]
+        tail = sorted((x for x in obs if x not in ordered_levels), key=str)
+        return head + tail
+    return sorted(obs, key=str)
+
+
+def _plot_ordinal(
+    s: pd.Series, name: str, out_dir: Path, *, ordered_levels: list | None = None,
+) -> list[Path]:
     nn = s.dropna()
     if nn.empty:
         return []
-    order = list(s.cat.categories) if isinstance(s.dtype, pd.CategoricalDtype) else sorted(nn.unique())
+    order = _ordinal_bar_order(nn, ordered_levels)
     fig, ax = plt.subplots(figsize=(7, 4))
     sns.countplot(x=nn.astype(str), order=[str(o) for o in order], ax=ax, color="#3b7ddd")
     ax.set_title(f"Ordinal distribution — {name}")
@@ -246,6 +261,117 @@ def _plot_ordinal(s: pd.Series, name: str, out_dir: Path) -> list[Path]:
     p = out_dir / f"{name}__bar.svg"
     _save_fig(fig, p)
     return [p]
+
+
+def plot_distribution_by_year(
+    df: pd.DataFrame,
+    variable: str,
+    year_col: str,
+    out_dir: Path | str,
+    *,
+    min_years: int = 2,
+    top_n: int = 15,
+) -> Path | None:
+    """
+    Two-panel SVG: overall category counts, then composition within each year.
+
+    Saved as ``<variable>__bar_by_year.svg``. Returns ``None`` when ``year_col``
+    is missing, the variable is absent, or fewer than ``min_years`` distinct years.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if variable not in df.columns or year_col not in df.columns:
+        return None
+
+    sub = df[[variable, year_col]].dropna()
+    if sub.empty:
+        return None
+
+    years = sorted(sub[year_col].astype(str).unique(), key=str)
+    if len(years) < min_years:
+        return None
+
+    vc = sub[variable].astype(str).value_counts()
+    if len(vc) > top_n:
+        keep = set(vc.head(top_n).index)
+        sub = sub.copy()
+        sub[variable] = sub[variable].astype(str).where(
+            sub[variable].astype(str).isin(keep), "(other)"
+        )
+        vc = sub[variable].value_counts()
+    cat_order = list(vc.index)
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(7, 8),
+        gridspec_kw={"height_ratios": [1, 1.15]},
+    )
+    fig.subplots_adjust(hspace=0.42, top=0.96, bottom=0.11, right=0.78)
+
+    sns.countplot(
+        data=sub.assign(**{variable: sub[variable].astype(str)}),
+        y=variable,
+        order=cat_order,
+        ax=ax1,
+        color="#3b7ddd",
+    )
+    ax1.set_title(f"Overall counts — {variable}")
+    ax1.set_xlabel("count")
+    ax1.set_ylabel(variable)
+
+    plot_df = sub.assign(
+        **{
+            variable: sub[variable].astype(str),
+            year_col: sub[year_col].astype(str),
+        }
+    )
+    ct = pd.crosstab(plot_df[year_col], plot_df[variable], normalize="index")
+    ct = ct.reindex(index=[str(y) for y in years], columns=cat_order, fill_value=0.0)
+    colors = sns.color_palette("husl", n_colors=len(cat_order))
+    x = np.arange(len(ct))
+    bottom = np.zeros(len(ct))
+    for i, cat in enumerate(ct.columns):
+        heights = ct[cat].to_numpy()
+        ax2.bar(x, heights, bottom=bottom, label=cat, color=colors[i], width=0.65)
+        bottom += heights
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(ct.index)
+    ax2.set_ylim(0, 1)
+    ax2.set_title(f"Share within each {year_col} (row-normalised)")
+    ax2.set_xlabel(year_col)
+    ax2.set_ylabel("proportion")
+    ax2.legend(title=variable, bbox_to_anchor=(1.02, 1), loc="upper left")
+
+    chi2_note: str | None = None
+    try:
+        from scipy.stats import chi2_contingency
+
+        raw_ct = pd.crosstab(plot_df[year_col], plot_df[variable])
+        if raw_ct.size > 0 and raw_ct.values.sum() > 0:
+            _, p, _, expected = chi2_contingency(raw_ct)
+            if (expected >= 5).all():
+                chi2_note = f"χ² ({year_col} × {variable}): p = {p:.4g}"
+    except Exception:
+        pass
+
+    if chi2_note:
+        # Centered footer — fixed slot, clear of axis labels and legend.
+        fig.text(
+            0.5, 0.03, chi2_note,
+            ha="center", va="center",
+            fontsize=8.5, color="#1f2937",
+            transform=fig.transFigure,
+            bbox=dict(
+                boxstyle="round,pad=0.45",
+                facecolor="#f3f4f6",
+                edgecolor="#9ca3af",
+                linewidth=0.8,
+            ),
+        )
+
+    p = out_dir / f"{variable}__bar_by_year.svg"
+    fig.savefig(p, format="svg", bbox_inches="tight")
+    plt.close(fig)
+    return p
 
 
 def _plot_nominal(s: pd.Series, name: str, out_dir: Path, top_n: int = 15) -> list[Path]:
@@ -334,7 +460,7 @@ def run_dda(
                    **_stats_categorical(s, ordered=(spec.kind == "ordinal"))}
             rows_cat.append(row)
             if spec.kind == "ordinal":
-                _plot_ordinal(s, col, figs_dir)
+                _plot_ordinal(s, col, figs_dir, ordered_levels=spec.ordered_levels)
             else:
                 _plot_nominal(s, col, figs_dir)
 

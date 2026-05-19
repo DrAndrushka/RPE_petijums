@@ -32,6 +32,7 @@ Also writes tables/inferential_summary.csv combining all targets.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -204,6 +205,16 @@ def _rubin_pool(thetas: np.ndarray, ses: np.ndarray) -> dict[str, float]:
 # Per-target multivariable model with MICE pooling
 # ---------------------------------------------------------------------------
 
+def _target_is_binary(y: pd.Series, spec: ColSpec | None) -> bool:
+    """Logistic regression requires a two-level outcome."""
+    nn = y.dropna()
+    if int(nn.nunique()) != 2:
+        return False
+    if spec is not None and spec.kind in ("continuous", "count"):
+        return False
+    return True
+
+
 def _encode_target(y: pd.Series, positive_class) -> tuple[pd.Series, object]:
     if positive_class is None:
         nn = y.dropna().unique()
@@ -303,6 +314,16 @@ def _forest_plot(pooled: pd.DataFrame, target: str, figs_dir: Path) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
+_INFERENTIAL_COLS = [
+    "target", "predictor_col", "or", "or_ci_lo", "or_ci_hi",
+    "coef", "se", "p", "df", "n_models",
+]
+
+
+def _empty_inferential_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_INFERENTIAL_COLS)
+
+
 def run_inferential(
     imputed_frames: list[pd.DataFrame],
     schema: dict[str, ColSpec],
@@ -324,6 +345,16 @@ def run_inferential(
 
     all_rows = []
     for target in targets:
+        if target not in imputed_frames[0].columns:
+            continue
+        spec = schema.get(target)
+        if not _target_is_binary(imputed_frames[0][target], spec):
+            warnings.warn(
+                f"Inferential skipped for '{target}': multivariable logistic "
+                f"requires a binary outcome (got kind={getattr(spec, 'kind', '?')}).",
+                stacklevel=2,
+            )
+            continue
         pooled_df, vif_df = fit_multivariable_logistic(
             imputed_frames, schema, target, predictors,
             positive_class=positive_class.get(target),
@@ -337,11 +368,12 @@ def run_inferential(
         all_rows.append(pooled_df)
 
     if not all_rows:
-        return pd.DataFrame()
+        empty = _empty_inferential_df()
+        _format_inferential_table(empty).to_csv(
+            tabs_dir / "inferential_summary.csv", index=False)
+        return empty
     combined = pd.concat(all_rows, ignore_index=True)
-    cols = ["target", "predictor_col", "or", "or_ci_lo", "or_ci_hi",
-            "coef", "se", "p", "df", "n_models"]
-    combined = combined[[c for c in cols if c in combined.columns]]
+    combined = combined[[c for c in _INFERENTIAL_COLS if c in combined.columns]]
     _format_inferential_table(combined).to_csv(
         tabs_dir / "inferential_summary.csv", index=False)
     return combined
