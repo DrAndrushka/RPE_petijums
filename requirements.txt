@@ -1,0 +1,14 @@
+# RPE clinical association pipeline — Python 3.11+
+# Tested on Python 3.12 with the pinned versions below.
+
+pandas>=2.2,<4
+numpy>=2.0,<3
+scipy>=1.11
+statsmodels>=0.14
+scikit-learn>=1.4
+matplotlib>=3.8
+seaborn>=0.13
+openpyxl>=3.1
+
+# Optional: run unit tests (stdlib only, no extra deps)
+# python -m unittest test_pipeline_fixes.py
