@@ -22,12 +22,13 @@ All p-values per target are corrected with Benjamini–Hochberg (FDR).
 Outputs (under output/eda/)
 ---------------------------
 - tables/associations.csv  : long-format (target, predictor, test, stat, p,
-                             p_fdr, effect, effect_size, n_used, direction)
+                             p_fdr, effect, effect_size, n_used)
 - figures/<target>__<predictor>.svg : the appropriate seaborn plot
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Sequence
 
@@ -38,6 +39,7 @@ import seaborn as sns
 from scipy.stats import (
     mannwhitneyu, spearmanr, chi2_contingency, fisher_exact, norm,
 )
+from statsmodels.stats.proportion import proportion_confint
 
 from schema_infer import ColSpec
 from cleaning import format_table_for_csv as _format_table_for_csv  # CSV display-only rounding
@@ -115,14 +117,45 @@ def _mwu_with_effect(x_group1: np.ndarray, x_group0: np.ndarray):
     sigma = np.sqrt(n1 * n0 * (n1 + n0 + 1) / 12)
     z = (U - mu) / sigma if sigma > 0 else np.nan
     r = abs(z) / np.sqrt(n1 + n0) if sigma > 0 else np.nan
-    # direction: median diff sign
-    direction = float(np.median(x_group1) - np.median(x_group0))
-    return U, p, r, n1 + n0, direction
+    return U, p, r, n1 + n0
 
 
 # ---------------------------------------------------------------------------
 # Per-pair plotting
 # ---------------------------------------------------------------------------
+
+def _polish_ax(ax: plt.Axes) -> None:
+    ax.yaxis.grid(True, linestyle="--", alpha=0.35, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _categorical_fig_width(n_levels: int) -> float:
+    return max(3.2, min(6.0, 1.4 * n_levels + 1.2))
+
+
+def _errorbar_yerr(props, lo, hi) -> np.ndarray:
+    """Matplotlib needs non-negative error bar lengths (Wilson CI vs k/n can disagree slightly)."""
+    props_a = np.clip(np.asarray(props, dtype=float), 0.0, 1.0)
+    lo_a = np.asarray(lo, dtype=float)
+    hi_a = np.asarray(hi, dtype=float)
+    return np.vstack([
+        np.maximum(0.0, props_a - lo_a),
+        np.maximum(0.0, hi_a - props_a),
+    ])
+
+
+def _annotate_above(
+    ax: plt.Axes, xs: np.ndarray, ys: np.ndarray, labels: Sequence[str],
+) -> None:
+    for xi, y, lab in zip(xs, ys, labels):
+        ax.annotate(
+            lab, xy=(xi, y), xytext=(0, 5),
+            textcoords="offset points", ha="center", va="bottom",
+            fontsize=9, color="#333333",
+        )
+
 
 def _plot_pair(
     df: pd.DataFrame, target: str, predictor: str,
@@ -134,28 +167,126 @@ def _plot_pair(
         return
 
     if pred_kind in ("continuous", "count"):
-        fig, ax = plt.subplots(figsize=(6, 4))
-        sns.boxplot(x=target, y=predictor, data=sub, ax=ax,
-                    hue=target, palette="Set2", legend=False)
-        sns.stripplot(x=target, y=predictor, data=sub, ax=ax,
-                      color="black", size=2, alpha=0.4)
+        groups = sorted(sub[target].dropna().unique(), key=str)
+        n_g = len(groups)
+        fig, ax = plt.subplots(figsize=(_categorical_fig_width(n_g), 4))
+        sns.boxplot(
+            x=target, y=predictor, data=sub, order=groups, hue=target,
+            ax=ax, palette="Set2", legend=False,
+            width=0.55, linewidth=1.2, fliersize=3,
+        )
+        sns.stripplot(
+            x=target, y=predictor, data=sub, order=groups, ax=ax,
+            color="#333333", size=2.5, alpha=0.35, jitter=0.22,
+        )
+        labels, tops = [], []
+        for i, g in enumerate(groups):
+            vals = sub.loc[sub[target] == g, predictor].astype(float)
+            n = len(vals)
+            med = float(vals.median()) if n else np.nan
+            tops.append(float(vals.quantile(0.75)) if n else np.nan)
+            labels.append(f"n={n}\nmed={med:.3g}" if n else "n=0")
+        _annotate_above(ax, np.arange(n_g), np.asarray(tops), labels)
+        y_hi = float(sub[predictor].max())
+        if np.isfinite(y_hi):
+            pad = (y_hi - float(sub[predictor].min())) * 0.12 or abs(y_hi) * 0.08 or 0.5
+            ax.set_ylim(top=y_hi + pad)
+        _polish_ax(ax)
+        ax.set_xlabel(target)
+        ax.set_ylabel(predictor)
         ax.set_title(f"{predictor} by {target}")
     elif pred_kind == "ordinal":
-        fig, ax = plt.subplots(figsize=(6, 4))
-        order = (list(sub[predictor].cat.categories)
-                 if isinstance(sub[predictor].dtype, pd.CategoricalDtype)
-                 else sorted(sub[predictor].dropna().unique()))
-        ct = pd.crosstab(sub[predictor], sub[target], normalize="index")
-        ct = ct.reindex(order)
-        ct.plot(kind="bar", stacked=True, ax=ax, colormap="Set2")
+        all_levels = (list(sub[predictor].cat.categories)
+                      if isinstance(sub[predictor].dtype, pd.CategoricalDtype)
+                      else sorted(sub[predictor].dropna().unique()))
+        levels = [lv for lv in all_levels if (sub[predictor] == lv).any()]
+        n_lv = len(levels)
+        fig, ax = plt.subplots(figsize=(_categorical_fig_width(n_lv), 4))
+        y_pos, _ = _encode_binary_target(sub[target], None)
+        props, lo, hi, ns = [], [], [], []
+        for lv in levels:
+            mask = sub[predictor] == lv
+            n = int(mask.sum())
+            k = int(y_pos.loc[mask].sum())
+            ns.append(n)
+            p = k / n
+            ci_lo, ci_hi = proportion_confint(k, n, alpha=0.05, method="wilson")
+            props.append(p)
+            lo.append(ci_lo)
+            hi.append(ci_hi)
+        x = np.arange(n_lv)
+        props_a = np.clip(np.asarray(props, dtype=float), 0.0, 1.0)
+        lo_a, hi_a = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+        ax.errorbar(
+            x, props_a, yerr=_errorbar_yerr(props_a, lo_a, hi_a),
+            fmt="o-", color="#3b7ddd", markersize=8, capsize=3,
+            linewidth=1.4, elinewidth=1.1,
+            markeredgecolor="white", markeredgewidth=1.2, zorder=3,
+        )
+        pad = 0.35 if n_lv <= 4 else 0.5
+        ax.set_xlim(-pad, n_lv - 1 + pad)
+        ymax = min(1.0, float(np.nanmax(hi_a)) + 0.14)
+        ax.set_ylim(0, max(0.35, ymax))
+        _annotate_above(
+            ax, x, hi_a,
+            [f"{p:.0%}\n(n={n})" for p, n in zip(props_a, ns)],
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [str(lv) for lv in levels],
+            rotation=30 if n_lv > 4 else 0,
+            ha="center" if n_lv <= 4 else "right",
+        )
+        _polish_ax(ax)
+        ax.set_xlabel(predictor)
+        ax.set_ylabel(f"P({target}=1)")
         ax.set_title(f"{predictor} → P({target})")
-        ax.set_ylabel("proportion")
     elif pred_kind in ("nominal", "binary"):
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ct = pd.crosstab(sub[predictor], sub[target])
-        ct.plot(kind="bar", ax=ax, colormap="Set2")
-        ax.set_title(f"{predictor} × {target}")
-        ax.set_ylabel("count")
+        all_levels = (list(sub[predictor].cat.categories)
+                      if isinstance(sub[predictor].dtype, pd.CategoricalDtype)
+                      else sorted(sub[predictor].dropna().unique(), key=str))
+        levels = [lv for lv in all_levels if (sub[predictor] == lv).any()]
+        n_lv = len(levels)
+        fig, ax = plt.subplots(figsize=(_categorical_fig_width(n_lv), 4))
+        y_pos, _ = _encode_binary_target(sub[target], None)
+        props, lo, hi, ns = [], [], [], []
+        for lv in levels:
+            mask = sub[predictor] == lv
+            n = int(mask.sum())
+            k = int(y_pos.loc[mask].sum())
+            ns.append(n)
+            p = k / n
+            ci_lo, ci_hi = proportion_confint(k, n, alpha=0.05, method="wilson")
+            props.append(p)
+            lo.append(ci_lo)
+            hi.append(ci_hi)
+        x = np.arange(n_lv)
+        props_a = np.clip(np.asarray(props, dtype=float), 0.0, 1.0)
+        lo_a, hi_a = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+        ax.errorbar(
+            x, props_a, yerr=_errorbar_yerr(props_a, lo_a, hi_a),
+            fmt="o", color="#3b7ddd", markersize=8, capsize=3,
+            linewidth=1.4, elinewidth=1.1,
+            markeredgecolor="white", markeredgewidth=1.2, zorder=3,
+        )
+        pad = 0.35 if n_lv <= 4 else 0.5
+        ax.set_xlim(-pad, n_lv - 1 + pad)
+        ymax = min(1.0, float(np.nanmax(hi_a)) + 0.14)
+        ax.set_ylim(0, max(0.35, ymax))
+        _annotate_above(
+            ax, x, hi_a,
+            [f"{p:.0%}\n(n={n})" for p, n in zip(props_a, ns)],
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [str(lv) for lv in levels],
+            rotation=30 if n_lv > 4 else 0,
+            ha="center" if n_lv <= 4 else "right",
+        )
+        _polish_ax(ax)
+        ax.set_xlabel(predictor)
+        ax.set_ylabel(f"P({target}=1)")
+        ax.set_title(f"{predictor} → P({target})")
     else:
         return
 
@@ -200,7 +331,7 @@ def screen_associations(
     positive_class = positive_class or {}
 
     testable_kinds = {"continuous", "count", "ordinal", "nominal", "binary", "datetime"}
-    if predictors is None:
+    if predictors is None or len(predictors) == 0:
         predictors = [c for c, sp in schema.items()
                       if c in df.columns and sp.keep and sp.kind in testable_kinds
                       and c not in targets]
@@ -221,18 +352,16 @@ def screen_associations(
                 rows.append({"target": target, "predictor": pred, "kind": spec.kind,
                              "test": "skip", "stat": np.nan, "p": np.nan,
                              "effect": np.nan, "effect_label": "",
-                             "direction": np.nan, "n_used": n_used,
-                             "positive_class": pos_used})
+                             "n_used": n_used, "positive_class": pos_used})
                 continue
 
             y_arr = pair["_y"].values
 
             if spec.kind in ("continuous", "count"):
                 x = pair[pred].astype(float).values
-                stat, p, eff, n, direction = _mwu_with_effect(x[y_arr == 1], x[y_arr == 0])
+                stat, p, eff, n = _mwu_with_effect(x[y_arr == 1], x[y_arr == 0])
                 row = {"test": "mann_whitney_u", "stat": stat, "p": p,
-                       "effect": eff, "effect_label": "rank_biserial_r",
-                       "direction": direction}
+                       "effect": eff, "effect_label": "rank_biserial_r"}
 
             elif spec.kind == "ordinal":
                 # Spearman on numeric codes
@@ -246,21 +375,18 @@ def screen_associations(
                 # returns NaN. We skip and record n/a explicitly.
                 if np.nanstd(codes) == 0 or np.nanstd(y_arr) == 0:
                     row = {"test": "spearman", "stat": np.nan, "p": np.nan,
-                           "effect": np.nan, "effect_label": "spearman_rho",
-                           "direction": np.nan}
+                           "effect": np.nan, "effect_label": "spearman_rho"}
                 else:
                     rho, p = spearmanr(codes, y_arr)
                     row = {"test": "spearman", "stat": float(rho), "p": float(p),
-                           "effect": float(rho), "effect_label": "spearman_rho",
-                           "direction": float(np.sign(rho))}
+                           "effect": float(rho), "effect_label": "spearman_rho"}
 
             elif spec.kind == "datetime":
                 t = pd.to_datetime(pair[pred], errors="coerce")
                 days = (t - t.min()).dt.days.astype(float).values
-                stat, p, eff, n, direction = _mwu_with_effect(days[y_arr == 1], days[y_arr == 0])
+                stat, p, eff, n = _mwu_with_effect(days[y_arr == 1], days[y_arr == 0])
                 row = {"test": "mann_whitney_u_days", "stat": stat, "p": p,
-                       "effect": eff, "effect_label": "rank_biserial_r",
-                       "direction": direction}
+                       "effect": eff, "effect_label": "rank_biserial_r"}
 
             elif spec.kind in ("nominal", "binary"):
                 ct = pd.crosstab(pair[pred], pair["_y"])
@@ -272,20 +398,17 @@ def screen_associations(
                         odds, p = fisher_exact(table, alternative="two-sided")
                         v = _cramers_v(table)
                         row = {"test": "fisher_exact", "stat": float(odds), "p": float(p),
-                               "effect": v, "effect_label": "cramers_v",
-                               "direction": float(np.sign(np.log(odds)) if odds > 0 else 0)}
+                               "effect": v, "effect_label": "cramers_v"}
                     else:
                         chi2, p, _, _ = chi2_contingency(table, correction=False)
                         v = _cramers_v(table)
                         row = {"test": "chi2", "stat": float(chi2), "p": float(p),
-                               "effect": v, "effect_label": "cramers_v",
-                               "direction": np.nan}
+                               "effect": v, "effect_label": "cramers_v"}
                 else:
                     chi2, p, _, _ = chi2_contingency(table, correction=False)
                     v = _cramers_v(table)
                     row = {"test": "chi2", "stat": float(chi2), "p": float(p),
-                           "effect": v, "effect_label": "cramers_v",
-                           "direction": np.nan}
+                           "effect": v, "effect_label": "cramers_v"}
             else:
                 continue
 
@@ -293,10 +416,20 @@ def screen_associations(
                         "n_used": n_used, "positive_class": pos_used})
             rows.append(row)
 
-            _plot_pair(df, target, pred, spec.kind, figs_dir)
+            try:
+                _plot_pair(df, target, pred, spec.kind, figs_dir)
+            except Exception as exc:
+                warnings.warn(
+                    f"EDA plot skipped for {target} × {pred}: {exc}",
+                    stacklevel=2,
+                )
 
     out = pd.DataFrame(rows)
     if out.empty:
+        out = pd.DataFrame(columns=[
+            "target", "predictor", "kind", "test", "stat", "p", "p_fdr",
+            "fdr_significant", "effect", "effect_label", "n_used", "positive_class",
+        ])
         _format_table_for_csv(out).to_csv(tabs_dir / "associations.csv", index=False)
         return out
 
@@ -308,9 +441,14 @@ def screen_associations(
     out["fdr_significant"] = out["p_fdr"] < fdr_alpha
 
     cols = ["target", "predictor", "kind", "test", "stat", "p", "p_fdr",
-            "fdr_significant", "effect", "effect_label", "direction",
+            "fdr_significant", "effect", "effect_label",
             "n_used", "positive_class"]
-    out = out[cols].sort_values(["target", "p_fdr"]).reset_index(drop=True)
+    out["_eff_abs"] = out["effect"].abs()
+    out = (out[cols + ["_eff_abs"]]
+           .sort_values(["target", "p_fdr", "_eff_abs"],
+                        ascending=[True, True, False])
+           .drop(columns="_eff_abs")
+           .reset_index(drop=True))
     # display-only rounding: integers stay int, fractions -> 3 sig figs (raw df returned)
     _format_table_for_csv(out).to_csv(tabs_dir / "associations.csv", index=False)
     return out

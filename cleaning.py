@@ -13,6 +13,7 @@ Everything here is universal — no project-specific column names.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Sequence, Any, Iterable
 
 import numpy as np
@@ -158,27 +159,40 @@ def format_table_for_csv(df: pd.DataFrame) -> pd.DataFrame:
 # Schema application
 # ---------------------------------------------------------------------------
 
-def apply_schema(df: pd.DataFrame, schema: dict[str, ColSpec]) -> pd.DataFrame:
+def apply_schema(
+    df: pd.DataFrame,
+    schema: dict[str, ColSpec],
+    *,
+    log: list[dict[str, Any]] | None = None,
+) -> pd.DataFrame:
     """
     Coerce dtypes and apply nulls/replacements according to schema.
     Returns a NEW dataframe (does not mutate input).
     Columns with kind='skip' are dropped from the returned frame.
+
+    If ``log`` is a list, per-column actions are appended for ``export_cleaning_artifacts``.
     """
     out = df.copy()
 
     for col, spec in schema.items():
         if col not in out.columns:
+            if log is not None:
+                log.append({
+                    "step": "apply_schema",
+                    "column": col,
+                    "action": "not_in_data",
+                    "kind": spec.kind,
+                })
             continue
 
-        # 1. Replacements first so downstream coercion sees clean values.
+        actions: list[str] = []
         if spec.replace:
             out[col] = out[col].replace(spec.replace)
-
-        # 2. Null markers.
+            actions.append("replace")
         if spec.nulls:
             out[col] = out[col].replace({v: pd.NA for v in spec.nulls})
+            actions.append("nulls")
 
-        # 3. Type coercion by kind.
         s = out[col]
         if spec.kind == "binary":
             out[col] = _coerce_binary(s)
@@ -195,11 +209,27 @@ def apply_schema(df: pd.DataFrame, schema: dict[str, ColSpec]) -> pd.DataFrame:
             out[col] = s.astype("string")
         elif spec.kind == "id":
             out[col] = s.astype("string")
-        # "skip" handled below
+        actions.append(f"coerce_{spec.kind}")
+
+        if log is not None and spec.kind != "skip":
+            log.append({
+                "step": "apply_schema",
+                "column": col,
+                "action": ",".join(actions),
+                "kind": spec.kind,
+            })
 
     drop_cols = [c for c, sp in schema.items() if sp.kind == "skip" and c in out.columns]
     if drop_cols:
         out = out.drop(columns=drop_cols)
+        if log is not None:
+            for c in drop_cols:
+                log.append({
+                    "step": "apply_schema",
+                    "column": c,
+                    "action": "dropped_skip",
+                    "kind": "skip",
+                })
 
     return out
 
@@ -359,3 +389,111 @@ def zscore(s: pd.Series) -> pd.Series:
     out = (s - mu) / sd
     out.name = (s.name or "value") + "_z"
     return out
+
+
+def _build_cleaning_summary(
+    *,
+    n_rows_raw: int,
+    n_rows_after_schema: int,
+    n_rows_final: int,
+    schema: dict[str, ColSpec],
+    drop_log: list[dict[str, Any]] | None,
+    dupes: pd.DataFrame | None,
+) -> pd.DataFrame:
+    n_skip = sum(1 for sp in schema.values() if sp.kind == "skip")
+    rows: list[dict[str, Any]] = [
+        {
+            "step": "raw_data",
+            "detail": "rows in source file",
+            "n_rows": n_rows_raw,
+            "n_dropped": 0,
+        },
+        {
+            "step": "apply_schema",
+            "detail": f"coerced dtypes; dropped {n_skip} skip column(s)",
+            "n_rows": n_rows_after_schema,
+            "n_dropped": n_rows_raw - n_rows_after_schema,
+        },
+    ]
+    n_dup = 0 if dupes is None else len(dupes)
+    rows.append({
+        "step": "duplicate_audit",
+        "detail": (
+            f"{n_dup} row(s) in duplicate ID groups (flagged, not removed)"
+            if n_dup else "no duplicate ID groups"
+        ),
+        "n_rows": n_rows_after_schema,
+        "n_dropped": 0,
+    })
+    for entry in drop_log or []:
+        rows.append({
+            "step": "drop_rows",
+            "detail": entry.get("reason", ""),
+            "criterion": entry.get("criterion", ""),
+            "n_rows": entry.get("n_remaining"),
+            "n_dropped": entry.get("n_dropped", 0),
+        })
+    rows.append({
+        "step": "final",
+        "detail": "rows entering DDA / downstream analysis",
+        "n_rows": n_rows_final,
+        "n_dropped": 0,
+    })
+    return pd.DataFrame(rows)
+
+
+def _build_cleaning_log(
+    schema_log: list[dict[str, Any]] | None,
+    drop_log: list[dict[str, Any]] | None,
+    dupes: pd.DataFrame | None,
+) -> pd.DataFrame:
+    parts: list[pd.DataFrame] = []
+    if schema_log:
+        parts.append(pd.DataFrame(schema_log))
+    if drop_log:
+        dl = pd.DataFrame(drop_log)
+        dl.insert(0, "step", "drop_rows")
+        parts.append(dl)
+    if dupes is not None and not dupes.empty:
+        d = dupes.copy()
+        d.insert(0, "step", "duplicate_audit")
+        parts.append(d)
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True, sort=False)
+
+
+def export_cleaning_artifacts(
+    output_root: Path | str,
+    *,
+    n_rows_raw: int,
+    n_rows_after_schema: int,
+    n_rows_final: int,
+    schema: dict[str, ColSpec],
+    drop_log: list[dict[str, Any]] | None = None,
+    dupes: pd.DataFrame | None = None,
+    schema_log: list[dict[str, Any]] | None = None,
+) -> dict[str, Path]:
+    """Write ``output/cleaning/cleaning_summary.csv`` and ``cleaning_log.csv``."""
+    out_dir = Path(output_root) / "cleaning"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = _build_cleaning_summary(
+        n_rows_raw=n_rows_raw,
+        n_rows_after_schema=n_rows_after_schema,
+        n_rows_final=n_rows_final,
+        schema=schema,
+        drop_log=drop_log,
+        dupes=dupes,
+    )
+    log = _build_cleaning_log(schema_log, drop_log, dupes)
+
+    summary_path = out_dir / "cleaning_summary.csv"
+    format_table_for_csv(summary).to_csv(summary_path, index=False)
+
+    paths = {"summary": summary_path}
+    if not log.empty:
+        log_path = out_dir / "cleaning_log.csv"
+        log.to_csv(log_path, index=False)
+        paths["log"] = log_path
+    return paths

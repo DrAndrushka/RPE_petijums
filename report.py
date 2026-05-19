@@ -89,6 +89,10 @@ class ReportConfig:
     nominal_alpha: float = 0.05
     effect: EffectThresholds = field(default_factory=EffectThresholds)
     missing: MissingThresholds = field(default_factory=MissingThresholds)
+    # Primary exposure / predictor of interest — gets a dedicated synthesis section.
+    focus_predictor: str | None = None
+    # For one-hot nominal focus vars: which level is reference (e.g. transperineāla).
+    focus_reference_level: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +214,154 @@ details.collapsible > summary {
 .tldr-list { padding-left: 22px; }
 .tldr-list li { margin: 4px 0; }
 
+/* Focus predictor spotlight */
+.focus-hero {
+    background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    margin: 16px 0 20px;
+}
+.focus-hero h3 { margin: 0 0 6px; font-size: 20px; color: var(--accent); }
+.focus-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    margin: 14px 0 6px;
+}
+.focus-stat-card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    text-align: center;
+}
+.focus-stat-card .label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.focus-stat-card .value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-top: 4px;
+    line-height: 1.2;
+}
+.focus-target-block {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin: 16px 0;
+    background: #fafbfc;
+}
+.focus-figure-hero {
+    max-width: 520px;
+    margin: 12px auto 18px;
+}
+.focus-figure-hero img { width: 100%; height: auto; display: block; }
+
+/* Variable of interest — compact tables + capped figure width */
+.focus-section { font-size: 15px; margin-top: 20px; }
+.focus-section > h3 { font-size: 19px; margin-bottom: 10px; }
+.focus-section h4 { font-size: 15px; margin: 10px 0 6px; }
+.focus-section p { font-size: 15px; margin: 4px 0 8px; }
+.focus-section table.report {
+    font-size: 14px;
+    margin: 6px 0 10px;
+    max-width: 100%;
+}
+.focus-section table.report th,
+.focus-section table.report td {
+    padding: 3px 5px;
+    line-height: 1.25;
+}
+.focus-section .focus-target-block {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 10px 0;
+    background: #fafbfc;
+}
+.focus-section .focus-hero {
+    padding: 12px 14px;
+    margin: 10px 0 14px;
+}
+.focus-section .focus-stat-grid {
+    grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+    gap: 6px;
+}
+.focus-section .focus-stat-card { padding: 6px 8px; }
+.focus-section .focus-stat-card .label { font-size: 9px; }
+.focus-section .focus-stat-card .value { font-size: 13px; }
+/* DDA distribution plot in Variable of interest (e.g. biopsy_type__bar.svg).
+   Sized via .focus-figure-hero below — not the full-width .figure-grid. */
+.focus-section .focus-figure-hero {
+    max-width: 600px;
+    margin: 8px auto 12px;
+}
+/* EDA plots per target — fixed width (avoids 1fr grid stretching one image full-page) */
+.focus-section .focus-eda-figure {
+    display: inline-block;
+    max-width: 500px;
+    width: 100%;
+    margin: 6px 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    background: #fff;
+}
+.focus-section .focus-eda-figure img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+.focus-section .focus-eda-figure .caption {
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    margin-top: 4px;
+    word-break: break-word;
+}
+.focus-section ul { font-size: 11.5px; padding-left: 18px; }
+.focus-section ul li { margin: 2px 0; }
+.focus-route-note { font-size: 12px; color: #374151; margin: 6px 0 0; }
+.focus-route-card {
+    margin: 8px 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+}
+.focus-route-card .focus-route-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin: 0 0 8px;
+    color: var(--muted);
+}
+.focus-route-table { width: 100%; font-size: 13px; border-collapse: collapse; }
+.focus-route-table th {
+    text-align: left;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--muted);
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+}
+.focus-route-table td { padding: 7px 8px; border-bottom: 1px solid #f3f4f6; }
+.focus-route-table tr.focus-route-highlight td {
+    background: #eff6ff;
+    border-left: 3px solid var(--accent);
+}
+.focus-route-table .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+}
+.focus-dda-routes { margin: 6px 0 10px; }
+
 /* Stats decoder */
 .stat-decoder dt { font-weight: 600; margin-top: 12px; }
 .stat-decoder dd { margin-left: 0; color: #374151; }
@@ -231,6 +383,21 @@ def _esc(x: Any) -> str:
     if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
         return ""
     return _html.escape(str(x))
+
+
+def human_pool_df(val: Any) -> str:
+    """Pooled Rubin df for display (large / non-finite → ∞)."""
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return ""
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+    if not math.isfinite(x) or x >= 9999:
+        return "∞"
+    if x == int(x):
+        return str(int(x))
+    return f"{x:.1f}"
 
 
 def human_p(p: Any) -> str:
@@ -453,6 +620,23 @@ def svg_grid(svg_paths: Iterable[Path], rel_base: Path,
             f'</div>'
         )
     return f'<div class="figure-grid">{"".join(cards)}</div>'
+
+
+
+def _focus_eda_figure(svg_path: Path, rel_base: Path) -> str:
+    """Single compact EDA plot for the Variable-of-interest section."""
+    if not svg_path.exists():
+        return '<p class="muted"><em>(figure not found)</em></p>'
+    try:
+        rel = svg_path.relative_to(rel_base)
+    except ValueError:
+        rel = svg_path.resolve()
+    return (
+        '<div class="focus-eda-figure">'
+        f'<img src="{_esc(str(rel))}" alt="{_esc(svg_path.stem)}" loading="lazy"/>'
+        f'<div class="caption">{_esc(svg_path.stem)}</div>'
+        '</div>'
+    )
 
 
 def details_block(summary: str, inner_html: str, *, open: bool = False) -> str:
@@ -899,8 +1083,6 @@ def render_eda(cfg: ReportConfig, art: Artifacts) -> str:
 
         sub["strength"] = sub["effect"].apply(
             lambda v: effect_badge(v, "corr", cfg.effect))
-        sub["p"] = sub["p"].apply(human_p)
-        sub["p_fdr"] = sub["p_fdr"].apply(human_p)
         sub["significance"] = sub.apply(
             lambda r: {"sig-fdr": "🟢 FDR-sig",
                        "sig-nominal": "🟡 nominal",
@@ -930,11 +1112,15 @@ def render_eda(cfg: ReportConfig, art: Artifacts) -> str:
         display_cols = ["predictor", "kind", "test", "effect_label", "effect",
                         "p", "p_fdr", "significance", "strength", "n_used"]
         display_cols = [c for c in display_cols if c in sub.columns]
+        interp_df = sub.copy()
+        sub["p"] = sub["p"].apply(human_p)
+        sub["p_fdr"] = sub["p_fdr"].apply(human_p)
         body.append(table_to_html(
             sub[display_cols], row_class_fn=_row_class,
             # 'strength' is a pre-built <span> badge — don't HTML-escape it.
             safe_html_cols=("strength",),
         ))
+        body.append(_render_eda_interpretation(target, interp_df, cfg))
 
         # Figures for this target
         figs = [p for p in art.eda_figures if p.stem.startswith(f"{target}__")]
@@ -999,9 +1185,26 @@ def render_inferential(cfg: ReportConfig, art: Artifacts) -> str:
                 return classify_or_direction(r.get(col_or), r.get(col_lo), r.get(col_hi))
             return ""
 
-        # Pre-format p for display only
+        # Sort by p-value, then effect strength (|log OR|)
+        if col_p:
+            tbl["_p_num"] = tbl[col_p].apply(_coerce_p)
+        if col_or:
+            tbl["_eff_abs"] = tbl[col_or].apply(
+                lambda v: abs(math.log(v)) if (o := _coerce_float(v)) and o > 0 else -1)
+        sort_cols = [c for c in ("_p_num", "_eff_abs", col_pred) if c and c in tbl.columns]
+        if sort_cols:
+            tbl = tbl.sort_values(
+                sort_cols,
+                ascending=[True, False, True][: len(sort_cols)],
+                na_position="last",
+            )
+        tbl = tbl.drop(columns=[c for c in ("_p_num", "_eff_abs") if c in tbl.columns])
+
+        # Pre-format p / df for display only
         if col_p and col_p in tbl.columns:
             tbl[col_p] = tbl[col_p].apply(human_p)
+        if "df" in tbl.columns:
+            tbl["df"] = tbl["df"].apply(human_pool_df)
 
         body.append(table_to_html(tbl, row_class_fn=_row_cls))
 
@@ -1056,6 +1259,73 @@ def _render_inferential_interpretation(target: str, tbl: pd.DataFrame,
     if not lines:
         return ""
     return "<h4>Interpretation</h4><ul>" + "".join(lines) + "</ul>"
+
+
+def _eda_direction_phrase(r: pd.Series, target: str) -> str:
+    """Plain-language wording for one EDA association row (Spearman sign from rho)."""
+    pred = _esc(r.get("predictor"))
+    test = str(r.get("test") or "")
+    eff = _coerce_float(r.get("effect"))
+    if test == "spearman" and eff is not None:
+        if eff > 0:
+            return (f"Higher <code>{pred}</code> is associated with a higher rate of "
+                    f"<code>{_esc(target)}</code>")
+        if eff < 0:
+            return (f"Higher <code>{pred}</code> is associated with a lower rate of "
+                    f"<code>{_esc(target)}</code>")
+    return (f"<code>{pred}</code> is associated with "
+            f"<code>{_esc(target)}</code> (see figure for group differences)")
+
+
+def _render_eda_interpretation(target: str, sub: pd.DataFrame,
+                               cfg: ReportConfig) -> str:
+    """Plain-English bullets for univariate EDA rows (one target)."""
+    lines: list[str] = []
+    for _, r in sub.iterrows():
+        test = str(r.get("test") or "")
+        if test == "skip":
+            continue
+        pred = _esc(r.get("predictor"))
+        eff_label = _esc(r.get("effect_label"))
+        eff = _esc(r.get("effect"))
+        sig = classify_significance(
+            r.get("p"), r.get("p_fdr"),
+            fdr_alpha=cfg.fdr_alpha, nominal_alpha=cfg.nominal_alpha)
+        tier = _strength_tier(r.get("effect"), "corr", cfg.effect)
+        _, strength_word, strength_hint = _STRENGTH_WORDING[tier]
+        p_fdr_str = _esc(human_p(r.get("p_fdr")))
+        p_str = _esc(human_p(r.get("p")))
+        phrase = _eda_direction_phrase(r, target)
+
+        if sig == "sig-fdr":
+            sig_note = f"FDR p = {p_fdr_str}"
+            bullet = "🟢"
+        elif sig == "sig-nominal":
+            sig_note = f"nominal p = {p_str}; FDR p = {p_fdr_str} (exploratory only)"
+            bullet = "🟡"
+        else:
+            sig_note = f"FDR p = {p_fdr_str}"
+            bullet = "⚪"
+
+        if sig == "sig-none":
+            lines.append(
+                f"<li>{bullet} <code>{pred}</code>: no clear marginal association "
+                f"({sig_note}; {eff_label} = {eff}).</li>")
+            continue
+
+        lines.append(
+            f"<li>{bullet} {phrase} "
+            f"({eff_label} = {eff}, {sig_note}; <em>{strength_word}</em> effect). "
+            f"{strength_hint}</li>")
+
+    if not lines:
+        return ""
+    caveat = (
+        "<li><em>Univariate screening only — effects are not adjusted for other "
+        "predictors. Use the multivariable section to judge independent "
+        "associations.</em></li>"
+    )
+    return "<h4>Interpretation</h4><ul>" + "".join(lines) + caveat + "</ul>"
 
 
 def render_stats_decoder() -> str:
@@ -1140,11 +1410,377 @@ def render_stats_decoder() -> str:
     )
 
 
+def _dda_row_for_column(art: Artifacts, col: str) -> tuple[pd.Series | None, str]:
+    """Return (row, table_label) for a column from any DDA summary table."""
+    tables = (
+        ("continuous / count", art.dda_continuous),
+        ("categorical / ordinal", art.dda_categorical),
+        ("binary", art.dda_binary),
+        ("datetime", art.dda_datetime),
+    )
+    for label, tbl in tables:
+        if tbl is None or tbl.empty or "column" not in tbl.columns:
+            continue
+        hit = tbl[tbl["column"].astype(str) == col]
+        if not hit.empty:
+            return hit.iloc[0], label
+    return None, ""
+
+
+def _figures_for_column(paths: Iterable[Path], col: str) -> list[Path]:
+    return sorted(
+        p for p in paths
+        if p.stem == col or p.stem.startswith(f"{col}__")
+    )
+
+
+def _inferential_matches(term: Any, col: str) -> bool:
+    t = str(term or "")
+    return t == col or t.startswith(f"{col}_")
+
+
+def _onehot_modeled_level(term: str, base: str) -> str | None:
+    """Category name encoded by a one-hot column ``base_<level>``."""
+    prefix = f"{base}_"
+    if term.startswith(prefix):
+        return term[len(prefix):]
+    return None
+
+
+def _invert_or_ci(o: float, lo: float, hi: float) -> tuple[float, float, float]:
+    """OR and CI for the reference level when the model reports the other level."""
+    if o <= 0 or lo <= 0 or hi <= 0:
+        return (np.nan, np.nan, np.nan)
+    return (1.0 / o, 1.0 / hi, 1.0 / lo)
+
+
+def _or_ci_phrase(o: float, lo: float, hi: float) -> str:
+    if not all(np.isfinite([o, lo, hi])):
+        return "—"
+    return f"{o:.2f} ({lo:.2f}–{hi:.2f})"
+
+
+def _infer_focus_reference(
+    col: str,
+    modeled_level: str,
+    cfg_ref: str | None,
+    dda_row: pd.Series | None,
+) -> str:
+    if cfg_ref:
+        return cfg_ref
+    if dda_row is not None:
+        for key in ("first_mode", "second_mode"):
+            lv = dda_row.get(key)
+            if lv is not None and not pd.isna(lv) and str(lv) != modeled_level:
+                return str(lv)
+    return "reference"
+
+
+def _render_focus_dda_routes(dda_row: pd.Series, highlight: str | None) -> str:
+    """Cohort mix for a binary/categorical focus predictor (two rows, one highlighted)."""
+    rows: list[tuple[str, Any]] = []
+    for lk, pk in (("first_mode", "first_mode_pct"), ("second_mode", "second_mode_pct")):
+        if lk not in dda_row.index:
+            continue
+        lv = dda_row.get(lk)
+        if lv is None or (isinstance(lv, float) and not np.isfinite(lv)) or pd.isna(lv):
+            continue
+        pct = dda_row.get(pk)
+        pct_s = f"{float(pct):.1f}%" if _coerce_float(pct) is not None else "—"
+        rows.append((str(lv), pct_s))
+    if len(rows) < 2:
+        return ""
+    body_rows = []
+    for lv, pct_s in rows:
+        hl = ' class="focus-route-highlight"' if highlight and lv == highlight else ""
+        body_rows.append(
+            f"<tr{hl}><td><strong>{_esc(lv)}</strong></td>"
+            f'<td class="mono">{_esc(pct_s)} of cohort</td></tr>')
+    return (
+        '<div class="focus-dda-routes">'
+        '<table class="focus-route-table">'
+        "<thead><tr><th>Route</th><th>Share in data</th></tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table></div>"
+    )
+
+
+def _render_focus_route_or_card(
+    target: str,
+    predictor: str,
+    modeled_level: str,
+    reference: str,
+    o: float,
+    lo: float,
+    hi: float,
+    p: Any,
+) -> str:
+    """Two-row adjusted OR table: reference (highlight) + modeled level (from regression)."""
+    o_ref, lo_ref, hi_ref = _invert_or_ci(o, lo, hi)
+    p_str = _esc(human_p(p))
+
+    def _row(level: str, or_txt: str, note: str, p_cell: str, highlight: bool) -> str:
+        hl = ' class="focus-route-highlight"' if highlight else ""
+        return (
+            f"<tr{hl}><td><strong>{_esc(level)}</strong></td>"
+            f'<td class="mono">{or_txt}</td><td>{note}</td>'
+            f"<td>{p_cell}</td></tr>"
+        )
+
+    rows_html = [
+        _row(
+            reference,
+            _or_ci_phrase(o_ref, lo_ref, hi_ref),
+            f"vs <strong>{_esc(modeled_level)}</strong>",
+            p_str,
+            highlight=True,
+        ),
+        _row(
+            modeled_level,
+            _or_ci_phrase(o, lo, hi),
+            f"vs <strong>{_esc(reference)}</strong>",
+            p_str,
+            highlight=False,
+        ),
+    ]
+
+    return (
+        '<div class="focus-route-card">'
+        f'<p class="focus-route-title">Adjusted OR · <code>{_esc(target)}</code> '
+        f"(copy-ready)</p>"
+        '<table class="focus-route-table">'
+        "<thead><tr><th>Biopsy route</th><th>Adj. OR (95% CI)</th>"
+        "<th>Comparison</th><th>p</th></tr></thead>"
+        f"<tbody>{''.join(rows_html)}</tbody></table>"
+        '<p class="focus-route-note">'
+        f"Regression reference: <strong>{_esc(reference)}</strong>. "
+        f"Highlighted row is the OR for your primary route; the other row matches "
+        f"<code>{_esc(predictor)}_{_esc(modeled_level)}</code> in the model output."
+        "</p></div>"
+    )
+
+
+def _focus_stat_cards(row: pd.Series, kind: str = "") -> str:
+    """Compact metric cards from one DDA summary row."""
+    specs: list[tuple[str, str]] = [
+        ("N", "n"),
+        ("Missing %", "missing_pct"),
+        ("Unique levels", "n_unique"),
+        ("Dominant value", "first_mode"),
+        ("Dominant %", "first_mode_pct"),
+        ("Second value", "second_mode"),
+        ("Second %", "second_mode_pct"),
+        ("Median", "median"),
+        ("Mean", "mean"),
+        ("IQR", "iqr"),
+        ("Balance", "balance"),
+    ]
+    cards = []
+    for label, key in specs:
+        if key not in row.index:
+            continue
+        val = row.get(key)
+        if val is None or (isinstance(val, float) and not np.isfinite(val)):
+            continue
+        if pd.isna(val):
+            continue
+        disp = f"{float(val):.3g}" if isinstance(val, (int, float, np.floating)) else str(val)
+        cards.append(
+            '<div class="focus-stat-card">'
+            f'<div class="label">{_esc(label)}</div>'
+            f'<div class="value">{_esc(disp)}</div>'
+            '</div>'
+        )
+    if not cards:
+        return ""
+    kind_badge = f' <span class="badge kind">{_esc(kind)}</span>' if kind else ""
+    return f'<div class="focus-stat-grid">{"".join(cards)}</div>{kind_badge}'
+
+
+def render_focus_predictor(cfg: ReportConfig, art: Artifacts) -> str:
+    """Spotlight one predictor: DDA, EDA, and multivariable stats + figures."""
+    col = (cfg.focus_predictor or "").strip()
+    if not col:
+        return ""
+
+    rel_base = (cfg.output_root / "report").resolve()
+    ref_level = (cfg.focus_reference_level or "").strip() or None
+    hero_extra = ""
+    if ref_level:
+        hero_extra = (
+            f'<p class="focus-route-note">Primary route: '
+            f"<strong>{_esc(ref_level)}</strong> "
+            f"(highlighted below; adjusted ORs for both routes).</p>"
+        )
+    body: list[str] = [
+        '<div class="focus-section">',
+        '<h3>🔬 Variable of interest</h3>',
+        '<div class="focus-hero">'
+        f'<h4>Primary focus: <code>{_esc(col)}</code></h4>'
+        '<p>Descriptive profile, univariate screening (EDA), and adjusted '
+        'multivariable results for this variable — all in one place.</p>',
+        hero_extra,
+        '</div>',
+    ]
+
+    if art.schema_summary is not None and not art.schema_summary.empty:
+        sc = art.schema_summary
+        name_col = "column" if "column" in sc.columns else "name" if "name" in sc.columns else None
+        if name_col:
+            hit = sc[sc[name_col].astype(str) == col]
+            if not hit.empty:
+                show = [c for c in ("kind", "keep", "ordered_levels", "note") if c in hit.columns]
+                if show:
+                    body.append("<h4>Schema</h4>")
+                    body.append(table_to_html(hit[show].head(1)))
+
+    dda_row, dda_label = _dda_row_for_column(art, col)
+    kind = str(dda_row.get("kind", "")).strip() if dda_row is not None else ""
+    if dda_row is not None:
+        dist_label = kind or dda_label
+        body.append(f"<h4>📊 Distribution ({_esc(dist_label)})</h4>")
+        cards_html = _focus_stat_cards(dda_row, kind)
+        if cards_html:
+            body.append(cards_html)
+        routes_html = _render_focus_dda_routes(dda_row, ref_level)
+        if routes_html:
+            body.append(routes_html)
+        body.append(table_to_html(pd.DataFrame([dda_row])))
+
+    # DDA figure: first SVG from output/dda/figures/ matching focus_predictor
+    # (stem == col or col__*, e.g. biopsy_type__bar.svg from dda.py). Display
+    # size is .focus-section .focus-figure-hero in _CSS above.
+    dda_figs = _figures_for_column(art.dda_figures, col)
+    if dda_figs:
+        body.append("<h4>Distribution figure</h4>")
+        hero = dda_figs[0]  # sorted(); usually the __bar chart for categoricals
+        try:
+            rel = hero.relative_to(rel_base)
+        except ValueError:
+            rel = hero.resolve()
+        body.append(
+            '<div class="focus-figure-hero figure-card">'
+            f'<img src="{_esc(str(rel))}" alt="{_esc(hero.stem)}"/>'
+            f'<div class="caption">{_esc(hero.stem)}</div>'
+            '</div>'
+        )
+
+    if art.missingness_summary is not None and not art.missingness_summary.empty:
+        ms = art.missingness_summary
+        ncol = "column" if "column" in ms.columns else "variable" if "variable" in ms.columns else None
+        if ncol:
+            mhit = ms[ms[ncol].astype(str) == col]
+            if not mhit.empty:
+                body.append("<h4>🕳️ Missingness</h4>")
+                body.append(table_to_html(mhit))
+
+    targets = [t for t in cfg.targets if t]
+    if not targets and art.associations is not None and "target" in art.associations.columns:
+        targets = list(art.associations["target"].dropna().unique())
+
+    eda_all = (
+        art.associations[art.associations["predictor"].astype(str) == col].copy()
+        if art.associations is not None and not art.associations.empty
+        and "predictor" in art.associations.columns
+        else None
+    )
+    if eda_all is not None and not eda_all.empty:
+        eda_all["_p_num"] = eda_all["p_fdr"].apply(_coerce_p)
+        eda_all["_eff_abs"] = eda_all["effect"].apply(
+            lambda v: abs(_coerce_float(v)) if _coerce_float(v) is not None else -1)
+        eda_all = eda_all.sort_values(
+            ["_p_num", "_eff_abs"], ascending=[True, False], na_position="last")
+
+    for target in targets:
+        body.append(f'<div class="focus-target-block">')
+        body.append(f'<h4>🎯 Outcome: <code>{_esc(target)}</code></h4>')
+
+        if eda_all is not None:
+            sub = eda_all[eda_all["target"].astype(str) == target]
+            if not sub.empty:
+                body.append("<p><strong>Univariate (EDA)</strong></p>")
+                show = [c for c in (
+                    "test", "effect_label", "effect", "p", "p_fdr",
+                    "fdr_significant", "n_used",
+                ) if c in sub.columns]
+                disp = sub[show].copy()
+                if "p" in disp.columns:
+                    disp["p"] = disp["p"].apply(human_p)
+                if "p_fdr" in disp.columns:
+                    disp["p_fdr"] = disp["p_fdr"].apply(human_p)
+                body.append(table_to_html(disp))
+                body.append(_render_eda_interpretation(
+                    target, sub, cfg))
+
+        eda_fig = next(
+            (p for p in art.eda_figures if p.stem == f"{target}__{col}"), None)
+        if eda_fig is not None:
+            body.append("<p><strong>EDA figure</strong></p>")
+            body.append(_focus_eda_figure(eda_fig, rel_base))
+
+        if target in art.inferential_multivariable:
+            tbl = art.inferential_multivariable[target].copy()
+            col_pred = _first_present(tbl, ["predictor_col", "predictor", "term"])
+            if col_pred:
+                hit = tbl[tbl[col_pred].astype(str).apply(
+                    lambda t: _inferential_matches(t, col))]
+                if not hit.empty:
+                    body.append("<p><strong>Multivariable (adjusted)</strong></p>")
+                    col_or = _first_present(hit, ["or", "OR"])
+                    col_lo = _first_present(hit, ["or_ci_lo", "ci_lo"])
+                    col_hi = _first_present(hit, ["or_ci_hi", "ci_hi"])
+                    col_p = _first_present(hit, ["p", "pvalue"])
+                    showed_route_card = False
+                    if (
+                        len(hit) == 1
+                        and col_pred
+                        and col_or and col_lo and col_hi
+                    ):
+                        r0 = hit.iloc[0]
+                        term = str(r0.get(col_pred))
+                        modeled = _onehot_modeled_level(term, col)
+                        o = _coerce_float(r0.get(col_or))
+                        lo = _coerce_float(r0.get(col_lo))
+                        hi = _coerce_float(r0.get(col_hi))
+                        if modeled and o is not None and lo is not None and hi is not None:
+                            reference = _infer_focus_reference(
+                                col, modeled, ref_level, dda_row)
+                            body.append(_render_focus_route_or_card(
+                                target, col, modeled, reference, o, lo, hi,
+                                r0.get(col_p) if col_p else None,
+                            ))
+                            showed_route_card = True
+                    if not showed_route_card:
+                        show = [c for c in (
+                            col_pred, "or", "or_ci_lo", "or_ci_hi", "p", "coef", "se",
+                        ) if c and c in hit.columns]
+                        show = list(dict.fromkeys(show))
+                        disp = hit[show].copy()
+                        if "p" in disp.columns:
+                            disp["p"] = disp["p"].apply(human_p)
+                        body.append(table_to_html(disp))
+                        body.append(_render_inferential_interpretation(
+                            target, disp, col_pred, col_or, col_lo, col_hi, col_p))
+
+        body.append("</div>")
+
+    if not (
+        (eda_all is not None and not eda_all.empty)
+        or dda_row is not None
+        or dda_figs
+    ):
+        body.append(warning_box(
+            f"No artifacts were found for predictor '{col}'. "
+            "Check the name matches the schema and that EDA / DDA were run.",
+        ))
+
+    body.append('</div>')
+    return "".join(body)
+
+
 def render_final_conclusion(cfg: ReportConfig, art: Artifacts) -> str:
     """🎯 Tiny TL;DR — top hits only, 5–8 bullets max."""
     bullets: list[str] = []
 
-    # 1. FDR-significant EDA findings (top by effect)
     if art.associations is not None and not art.associations.empty:
         df = art.associations.copy()
         df["_p_num"] = df.get("p_fdr").apply(_coerce_p) if "p_fdr" in df.columns else None
@@ -1165,11 +1801,10 @@ def render_final_conclusion(cfg: ReportConfig, art: Artifacts) -> str:
                 f"FDR p={human_p(r.get('p_fdr'))})."
             )
 
-    # 2. Stable inferential findings (CI excludes 1)
     for target, tbl in art.inferential_multivariable.items():
-        col_or  = _first_present(tbl, ["or", "OR", "odds_ratio"])
-        col_lo  = _first_present(tbl, ["or_ci_lo", "ci_lo", "lower"])
-        col_hi  = _first_present(tbl, ["or_ci_hi", "ci_hi", "upper"])
+        col_or = _first_present(tbl, ["or", "OR", "odds_ratio"])
+        col_lo = _first_present(tbl, ["or_ci_lo", "ci_lo", "lower"])
+        col_hi = _first_present(tbl, ["or_ci_hi", "ci_hi", "upper"])
         col_pred = _first_present(tbl, ["predictor_col", "predictor", "term"])
         if not all([col_or, col_lo, col_hi, col_pred]):
             continue
@@ -1190,7 +1825,6 @@ def render_final_conclusion(cfg: ReportConfig, art: Artifacts) -> str:
                     f"was associated with <strong>lower</strong> odds of "
                     f"<code>{_esc(target)}</code> (OR={o:.2f}, 95% CI {lo:.2f}–{hi:.2f}).")
 
-    # 3. Targets with no convincing signal
     if art.associations is not None and not art.associations.empty:
         for target in cfg.targets:
             sub = art.associations[art.associations.get("target") == target]
@@ -1202,35 +1836,34 @@ def render_final_conclusion(cfg: ReportConfig, art: Artifacts) -> str:
                     f"⚪ No FDR-significant association was found for "
                     f"<code>{_esc(target)}</code>.")
 
-    # 4. Caution about data quality
     cautions = []
     if art.missingness_summary is not None and not art.missingness_summary.empty:
-        col = ("missing_pct" if "missing_pct" in art.missingness_summary.columns
-               else "pct_missing" if "pct_missing" in art.missingness_summary.columns
-               else None)
-        if col:
+        miss_col = ("missing_pct" if "missing_pct" in art.missingness_summary.columns
+                    else "pct_missing" if "pct_missing" in art.missingness_summary.columns
+                    else None)
+        if miss_col:
             high = art.missingness_summary[
-                art.missingness_summary[col].apply(_coerce_float)
+                art.missingness_summary[miss_col].apply(_coerce_float)
                 .apply(lambda v: v is not None and v >= cfg.missing.high)]
             if not high.empty:
                 cautions.append(
                     f"🚨 {len(high)} variable(s) had &gt;{cfg.missing.high:.0f}% "
-                    f"missingness — interpret any analyses using them with caution."
-                )
+                    f"missingness — interpret any analyses using them with caution.")
     bullets.extend(cautions)
 
-    # Cap at 8
     bullets = bullets[:8]
     if not bullets:
         bullets = ["<em>(No findings were detected from the supplied artifacts.)</em>"]
 
     lis = "".join(f"<li>{b}</li>" for b in bullets)
+    focus = render_focus_predictor(cfg, art)
     return (
         '<section class="report-section">'
-        '<h2>🎯 Final tiny conclusion</h2>'
+        '<h2>🎯 Final conclusion</h2>'
         '<p>The bottom line, distilled. For full details refer to the EDA and '
         'multivariable tables above.</p>'
         f'<ul class="tldr-list">{lis}</ul>'
+        f'{focus}'
         '</section>'
     )
 
@@ -1333,6 +1966,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                    help="Optional schema CSV or JSON to render the schema section.")
     p.add_argument("--title", default="Research Data Analysis Report")
     p.add_argument("--author", default="")
+    p.add_argument("--focus-predictor", default=None,
+                   help="Column name to spotlight in the final conclusion section.")
     p.add_argument("--out", type=Path, default=None,
                    help="Output HTML path. Defaults to <output-root>/report/report.html")
     return p.parse_args(argv)
@@ -1346,6 +1981,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         author=args.author,
         targets=tuple(args.targets),
         schema_path=args.schema.expanduser().resolve() if args.schema else None,
+        focus_predictor=args.focus_predictor,
     )
     out_path = args.out or (cfg.output_root / "report" / "report.html")
     html = build_report(cfg)

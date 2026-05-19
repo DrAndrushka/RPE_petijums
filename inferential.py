@@ -33,7 +33,7 @@ Also writes tables/inferential_summary.csv combining all targets.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,6 +45,29 @@ from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 from schema_infer import ColSpec
 from cleaning import format_table_for_csv as _format_table_for_csv  # CSV display-only rounding
+
+
+def _pool_df_for_display(val: Any) -> object:
+    """Format pooled df for CSV/report (avoids 1e+300 style junk when B ≪ W)."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return ""
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return val
+    if not np.isfinite(x) or x >= 9999:
+        return "∞"
+    if x == int(x):
+        return int(x)
+    return round(x, 1)
+
+
+def _format_inferential_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Display-only copy for saved CSVs (in-memory tables stay numeric)."""
+    out = df.copy()
+    if "df" in out.columns:
+        out["df"] = out["df"].map(_pool_df_for_display)
+    return _format_table_for_csv(out)
 
 
 def _ensure_dirs(root: Path) -> tuple[Path, Path]:
@@ -146,10 +169,17 @@ def _rubin_pool(thetas: np.ndarray, ses: np.ndarray) -> dict[str, float]:
     between = float(np.var(thetas, ddof=1)) if m > 1 else 0.0
     total = within + (1 + 1 / m) * between
     se = float(np.sqrt(total))
-    # Barnard–Rubin degrees of freedom
-    if between > 0 and m > 1:
-        rel_incr = (1 + 1 / m) * between / within if within > 0 else np.inf
-        df = (m - 1) * (1 + 1 / rel_incr) ** 2 if np.isfinite(rel_incr) else np.inf
+    # Barnard–Rubin degrees of freedom (cap pathological blow-ups when B << W)
+    _DF_CAP = 9999.0
+    _REL_INCR_FLOOR = 1e-6
+    if between > 0 and m > 1 and within > 0:
+        rel_incr = (1 + 1 / m) * between / within
+        if rel_incr < _REL_INCR_FLOOR:
+            df = np.inf
+        else:
+            df = (m - 1) * (1 + 1 / rel_incr) ** 2
+            if not np.isfinite(df) or df > _DF_CAP:
+                df = np.inf
     else:
         df = np.inf
     if df == np.inf:
@@ -300,7 +330,8 @@ def run_inferential(
             vif_threshold=vif_threshold,
         )
         # display-only rounding on save; raw df kept for downstream concat/plots
-        _format_table_for_csv(pooled_df).to_csv(tabs_dir / f"{target}__multivariable.csv", index=False)
+        _format_inferential_table(pooled_df).to_csv(
+            tabs_dir / f"{target}__multivariable.csv", index=False)
         _format_table_for_csv(vif_df).to_csv(tabs_dir / f"{target}__vif.csv", index=False)
         _forest_plot(pooled_df, target, figs_dir)
         all_rows.append(pooled_df)
@@ -311,5 +342,6 @@ def run_inferential(
     cols = ["target", "predictor_col", "or", "or_ci_lo", "or_ci_hi",
             "coef", "se", "p", "df", "n_models"]
     combined = combined[[c for c in cols if c in combined.columns]]
-    _format_table_for_csv(combined).to_csv(tabs_dir / "inferential_summary.csv", index=False)
+    _format_inferential_table(combined).to_csv(
+        tabs_dir / "inferential_summary.csv", index=False)
     return combined

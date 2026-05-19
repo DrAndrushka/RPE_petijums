@@ -27,6 +27,7 @@ Usage
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Any, Literal, Optional
 import re
 
@@ -185,3 +186,17 @@ def schema_summary(schema: dict[str, ColSpec]) -> pd.DataFrame:
             "note": spec.note,
         })
     return pd.DataFrame(rows)
+
+
+def export_schema_summary(
+    schema: dict[str, ColSpec],
+    output_root: Path | str = "output",
+) -> Path:
+    """Write ``output/schema/schema_summary.csv`` for the HTML report."""
+    from cleaning import format_table_for_csv
+
+    out_dir = Path(output_root) / "schema"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "schema_summary.csv"
+    format_table_for_csv(schema_summary(schema)).to_csv(path, index=False)
+    return path
