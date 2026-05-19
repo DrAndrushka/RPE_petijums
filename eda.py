@@ -240,10 +240,19 @@ def screen_associations(
                                        categories=spec.ordered_levels
                                        if spec.ordered_levels else None,
                                        ordered=True).codes.astype(float)
-                rho, p = spearmanr(codes, y_arr)
-                row = {"test": "spearman", "stat": float(rho), "p": float(p),
-                       "effect": float(rho), "effect_label": "spearman_rho",
-                       "direction": float(np.sign(rho))}
+                # Guard against constant input (zero variance) — happens when a
+                # predictor/target has only one observed level after NA drop.
+                # Spearman is undefined; scipy raises ConstantInputWarning and
+                # returns NaN. We skip and record n/a explicitly.
+                if np.nanstd(codes) == 0 or np.nanstd(y_arr) == 0:
+                    row = {"test": "spearman", "stat": np.nan, "p": np.nan,
+                           "effect": np.nan, "effect_label": "spearman_rho",
+                           "direction": np.nan}
+                else:
+                    rho, p = spearmanr(codes, y_arr)
+                    row = {"test": "spearman", "stat": float(rho), "p": float(p),
+                           "effect": float(rho), "effect_label": "spearman_rho",
+                           "direction": float(np.sign(rho))}
 
             elif spec.kind == "datetime":
                 t = pd.to_datetime(pair[pred], errors="coerce")
